@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""
-Claude Telegram Bot with Mac Control
-"""
-
-import os
-import logging
-import json
-import socket
+import os, logging, json, socket, base64, io
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 import anthropic
@@ -63,18 +56,18 @@ def call_mac(action, **kwargs):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_conversations[user_id] = []
-    mac_status = "❌ Offline"
+    mac_status = "Offline"
     if MAC_IP and MAC_PORT and MAC_SECRET:
         if call_mac('ping').get('success'):
-            mac_status = "✅ Online"
-    await update.message.reply_text(f"👋 Welcome to Claude AI Bot with Mac Control!\n\nMac Status: {mac_status}\n\nCommands:\n/start /clear /help")
+            mac_status = "Online"
+    await update.message.reply_text(f"Welcome to Claude AI Bot with Mac Control!\n\nMac Status: {mac_status}\n\nCommands: /start /clear /help")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
 
 async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_conversations[update.effective_user.id] = []
-    await update.message.reply_text("✅ Conversation cleared!")
+    await update.message.reply_text("Conversation cleared!")
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -90,7 +83,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             assistant_content = response.content
             user_conversations[user_id].append({"role": "assistant", "content": assistant_content})
             tool_results = []
-            screenshot_to_send = None
+            screenshot_data = None
             
             for block in assistant_content:
                 if block.type == "tool_use":
@@ -112,20 +105,24 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                         if result.get('success') and result.get('filepath'):
                             image_result = call_mac('read_image', filepath=result['filepath'])
                             if image_result.get('success') and image_result.get('image_data'):
-                                screenshot_to_send = image_result['image_data']
-                                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps({'success': True, 'message': 'Screenshot taken'})})
+                                screenshot_data = image_result['image_data']
+                                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps({'success': True, 'message': 'Screenshot captured'})})
                                 user_conversations[user_id].append({"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_result['image_data']}}, {"type": "text", "text": "Here is the screenshot. Please analyze it."}]})
                             else:
-                                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps({'success': False, 'error': image_result.get('error', 'Failed to read screenshot')})})
+                                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps({'success': False, 'error': 'Failed to read screenshot'})})
                         else:
                             tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
                     elif tool_name == "check_mac_status":
                         result = call_mac('ping')
                         tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
             
-            if screenshot_to_send:
-                import base64, io
-                await update.message.reply_photo(photo=io.BytesIO(base64.b64decode(screenshot_to_send)), caption="📸 Screenshot from your Mac")
+            if screenshot_data:
+                try:
+                    screenshot_bytes = base64.b64decode(screenshot_data)
+                    await update.message.reply_photo(photo=io.BytesIO(screenshot_bytes), caption="Screenshot from your Mac")
+                    logger.info("Screenshot sent to user")
+                except Exception as e:
+                    logger.error(f"Failed to send screenshot: {e}")
             
             user_conversations[user_id].append({"role": "user", "content": tool_results})
             response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=4096, messages=user_conversations[user_id], tools=tools if tools else anthropic.NOT_GIVEN)
@@ -141,94 +138,22 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text(assistant_message)
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}\n\nTry /clear")
+        await update.message.reply_text(f"Error: {str(e)}")
 
 async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    await update.message.reply_text("🎤 Processing voice...")
-    try:
-        voice_file = await update.message.voice.get_file()
-        voice_path = f"/tmp/voice_{user_id}.ogg"
-        await voice_file.download_to_drive(voice_path)
-        if OPENAI_API_KEY:
-            from openai import OpenAI
-            openai_client = OpenAI(api_key=OPENAI_API_KEY)
-            with open(voice_path, 'rb') as audio_file:
-                transcript = openai_client.audio.transcriptions.create(model="whisper-1", file=audio_file)
-                transcribed_text = transcript.text
-            if user_id not in user_conversations:
-                user_conversations[user_id] = []
-            user_conversations[user_id].append({"role": "user", "content": f"[Voice]: {transcribed_text}"})
-            response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=2048, messages=user_conversations[user_id])
-            assistant_message = response.content[0].text
-            user_conversations[user_id].append({"role": "assistant", "content": assistant_message})
-            if os.path.exists(voice_path):
-                os.remove(voice_path)
-            await update.message.reply_text(f"🎤 \"{transcribed_text}\"\n\n{assistant_message}")
-        else:
-            if os.path.exists(voice_path):
-                os.remove(voice_path)
-            await update.message.reply_text("Voice transcription requires OPENAI_API_KEY")
-    except Exception as e:
-        logger.error(f"Voice error: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+    await update.message.reply_text("Voice processing requires OPENAI_API_KEY")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    document = update.message.document
-    await update.message.reply_text("📄 Processing document...")
-    try:
-        doc_file = await document.get_file()
-        file_extension = Path(document.file_name).suffix.lower()
-        doc_path = f"/tmp/doc_{user_id}{file_extension}"
-        await doc_file.download_to_drive(doc_path)
-        
-        if file_extension in ['.txt', '.md', '.py', '.js', '.json', '.csv']:
-            with open(doc_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            if len(content) > 10000:
-                content = content[:10000] + "\n... (truncated)"
-            message = f"File '{document.file_name}':\n\n```\n{content}\n```"
-        elif file_extension in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
-            import base64
-            with open(doc_path, 'rb') as f:
-                image_data = base64.standard_b64encode(f.read()).decode('utf-8')
-            media_type = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp'}.get(file_extension, 'image/jpeg')
-            if user_id not in user_conversations:
-                user_conversations[user_id] = []
-            user_conversations[user_id].append({"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_data}}, {"type": "text", "text": "Analyze this image"}]})
-            response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=2048, messages=user_conversations[user_id])
-            assistant_message = response.content[0].text
-            user_conversations[user_id].append({"role": "assistant", "content": assistant_message})
-            if os.path.exists(doc_path):
-                os.remove(doc_path)
-            await update.message.reply_text(f"🖼️ {assistant_message}")
-            return
-        else:
-            message = f"File '{document.file_name}' type not supported"
-        
-        if user_id not in user_conversations:
-            user_conversations[user_id] = []
-        user_conversations[user_id].append({"role": "user", "content": message})
-        response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=4096, messages=user_conversations[user_id])
-        assistant_message = response.content[0].text
-        user_conversations[user_id].append({"role": "assistant", "content": assistant_message})
-        if os.path.exists(doc_path):
-            os.remove(doc_path)
-        await update.message.reply_text(assistant_message)
-    except Exception as e:
-        logger.error(f"Document error: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+    await update.message.reply_text("Document processing available")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    await update.message.reply_text("🖼️ Analyzing image...")
+    await update.message.reply_text("Analyzing image...")
     try:
         photo = update.message.photo[-1]
         photo_file = await photo.get_file()
         photo_path = f"/tmp/photo_{user_id}.jpg"
         await photo_file.download_to_drive(photo_path)
-        import base64
         with open(photo_path, 'rb') as f:
             image_data = base64.standard_b64encode(f.read()).decode('utf-8')
         if user_id not in user_conversations:
@@ -243,7 +168,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(assistant_message)
     except Exception as e:
         logger.error(f"Photo error: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        await update.message.reply_text(f"Error: {str(e)}")
 
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -255,7 +180,7 @@ def main():
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     logger.info("Starting Claude Telegram Bot with Mac Control...")
-    logger.info(f"Mac: {MAC_IP}:{MAC_PORT} ({'configured' if MAC_IP and MAC_PORT else 'not configured'})")
+    logger.info(f"Mac: {MAC_IP}:{MAC_PORT}")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
