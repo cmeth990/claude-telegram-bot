@@ -34,17 +34,10 @@ MAC_TOOLS = [
     {"name": "execute_javascript_in_chrome", "description": "Execute JavaScript in Chrome's active tab", "input_schema": {"type": "object", "properties": {"js_code": {"type": "string"}}, "required": ["js_code"]}},
     {"name": "wait", "description": "Wait for seconds (1-30)", "input_schema": {"type": "object", "properties": {"seconds": {"type": "integer"}}, "required": ["seconds"]}},
     {"name": "check_mac_status", "description": "Check if Mac is online", "input_schema": {"type": "object", "properties": {}, "required": []}},
-    {"name": "capture_images", "description": """Capture multiple images from current webpage (auto-selects visible images).
-Returns: {screenshots: [{image_data, url, alt, width, height}...], page_title, page_url, count}""",
-     "input_schema": {"type": "object", "properties": {"count": {"type": "integer", "description": "Max images (default 5)"}, "min_width": {"type": "integer", "description": "Min width px (default 150)"}, "min_height": {"type": "integer", "description": "Min height px (default 150)"}}, "required": []}},
-    {"name": "list_page_images", "description": """STEP 1 for visual curation: Get metadata about all images on current page.
-Use this AFTER taking a window screenshot so you can see the page.
-Returns index, position, size, alt text for each image. Then use download_selected_images with the indices you want.""",
+    {"name": "list_page_images", "description": """Get metadata about all images on current page. Returns index, position, size, alt text for each image. Use download_selected_images with the indices you want.""",
      "input_schema": {"type": "object", "properties": {"min_width": {"type": "integer"}, "min_height": {"type": "integer"}}, "required": []}},
-    {"name": "download_selected_images", "description": """STEP 2 for visual curation: Download specific images by index.
-After viewing the page screenshot and calling list_page_images, use this to download only the images that match what the user wants.
-Pass the indices of images you want to download.""",
-     "input_schema": {"type": "object", "properties": {"indices": {"type": "array", "items": {"type": "integer"}, "description": "List of image indices to download (from list_page_images)"}}, "required": ["indices"]}}
+    {"name": "download_selected_images", "description": """Download specific images by index. Pass the indices of images you want to download (from list_page_images). Returns clean image files with their Pinterest/source links.""",
+     "input_schema": {"type": "object", "properties": {"indices": {"type": "array", "items": {"type": "integer"}, "description": "List of image indices to download"}}, "required": ["indices"]}}
 ]
 
 def call_mac(action, **kwargs):
@@ -96,16 +89,13 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
         tools = MAC_TOOLS if (MAC_IP and MAC_PORT and MAC_SECRET) else None
-        system_prompt = """You are controlling a Mac computer. When capturing images from web pages:
+        system_prompt = """You control a Mac. For capturing images from websites:
 
-PREFERRED: Use the visual curation workflow:
-1. Take a window screenshot to see the page
-2. Call list_page_images to get image metadata
-3. Based on what you see, call download_selected_images with specific indices
+1. Call list_page_images to get all images with their indices
+2. Call download_selected_images with the indices you want
 
-AVOID: Don't use capture_images unless the user just wants any random images quickly.
-
-The visual curation workflow gives you control to pick the BEST images that match what the user wants."""
+This downloads the actual image files (not screenshots) with their source links.
+DO NOT use take_screenshot for capturing product/pin images - that creates overlapping crops."""
         response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=4096, system=system_prompt, messages=user_conversations[user_id], tools=tools if tools else anthropic.NOT_GIVEN)
         while response.stop_reason == "tool_use":
             assistant_content = response.content
@@ -144,7 +134,7 @@ The visual curation workflow gives you control to pick the BEST images that matc
                         if result.get("success") and result.get("filepath"):
                             image_result = call_mac("read_image", filepath=result["filepath"])
                             if image_result.get("success") and image_result.get("image_data"):
-                                screenshots_to_send.append({"data": image_result["image_data"], "mode": mode})
+                                screenshots_to_send.append({"data": image_result["image_data"], "mode": "screenshot"})
                                 tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_result["image_data"]}}, {"type": "text", "text": f"Screenshot captured ({mode})"}]})
                             else:
                                 tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps({"success": False, "error": "Failed to read"})})
@@ -158,42 +148,32 @@ The visual curation workflow gives you control to pick the BEST images that matc
                     elif tool_name == "check_mac_status":
                         result = call_mac("ping")
                         tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
-                    elif tool_name == "capture_images":
-                        result = call_mac("capture_images", count=tool_input.get("count", 5), min_width=tool_input.get("min_width", 150), min_height=tool_input.get("min_height", 150))
-                        if result.get("success") and result.get("screenshots"):
-                            for i, img in enumerate(result["screenshots"]):
-                                screenshots_to_send.append({"data": img["image_data"], "url": img.get("url", ""), "title": img.get("alt", f"Image {i+1}"), "mode": "capture", "description": f"{img.get('width', '?')}x{img.get('height', '?')}px"})
-                            summary = {"success": True, "count": result["count"], "page_title": result.get("page_title", ""), "page_url": result.get("page_url", ""), "images": [{"url": s["url"], "alt": s.get("alt", ""), "width": s["width"], "height": s["height"]} for s in result["screenshots"]]}
-                            tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(summary)})
-                        else:
-                            tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
                     elif tool_name == "list_page_images":
                         result = call_mac("list_page_images", min_width=tool_input.get("min_width", 150), min_height=tool_input.get("min_height", 150))
                         tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
                     elif tool_name == "download_selected_images":
                         result = call_mac("download_selected_images", indices=tool_input.get("indices", []))
                         if result.get("success") and result.get("screenshots"):
-                            for i, img in enumerate(result["screenshots"]):
-                                screenshots_to_send.append({"data": img["image_data"], "url": img.get("url", ""), "title": img.get("alt", f"Image {img.get('index', i)}"), "mode": "selected", "description": f"{img.get('width', '?')}x{img.get('height', '?')}px"})
-                            summary = {"success": True, "count": result["count"], "downloaded_indices": [s["index"] for s in result["screenshots"]]}
-                            tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(summary)})
+                            for img in result["screenshots"]:
+                                screenshots_to_send.append({
+                                    "data": img["image_data"],
+                                    "url": img.get("url", ""),
+                                    "alt": img.get("alt", ""),
+                                    "mode": "download"
+                                })
+                            tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps({"success": True, "count": result["count"]})})
                         else:
                             tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
-            for idx, screenshot in enumerate(screenshots_to_send):
+            for screenshot in screenshots_to_send:
                 try:
                     screenshot_bytes = base64.b64decode(screenshot["data"])
-                    caption = ""
-                    if screenshot.get("mode") == "selected" or screenshot.get("mode") == "capture":
-                        # For curated images, show clean caption with link
-                        if screenshot.get("title"):
-                            caption = screenshot["title"]
-                        if screenshot.get("url"):
-                            caption += f"\n\n{screenshot['url']}"
+                    if screenshot.get("mode") == "download":
+                        caption = screenshot.get("url", "") if screenshot.get("url") else None
                     else:
-                        caption = f"Screenshot {idx+1}"
-                    await update.message.reply_photo(photo=io.BytesIO(screenshot_bytes), caption=caption[:1024] if caption else None)
+                        caption = None
+                    await update.message.reply_photo(photo=io.BytesIO(screenshot_bytes), caption=caption)
                 except Exception as e:
-                    logger.error(f"Failed to send screenshot {idx+1}: {e}")
+                    logger.error(f"Failed to send image: {e}")
             user_conversations[user_id].append({"role": "user", "content": tool_results})
             response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=4096, system=system_prompt, messages=user_conversations[user_id], tools=tools if tools else anthropic.NOT_GIVEN)
         assistant_message = ""
