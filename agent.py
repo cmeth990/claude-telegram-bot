@@ -850,6 +850,8 @@ Be efficient and fast. Only take screenshots when needed to verify state."""
 
         if result.returncode == 0:
             log("Claude Code completed Uber automation successfully")
+            log(f"Claude stdout: {result.stdout[:1000] if result.stdout else 'empty'}")
+            log(f"Claude stderr: {result.stderr[:500] if result.stderr else 'empty'}")
             return {
                 'success': True,
                 'message': f'Uber ride to {destination} is ready!',
@@ -859,7 +861,8 @@ Be efficient and fast. Only take screenshots when needed to verify state."""
                 'claude_output': result.stdout[:500] if result.stdout else ''
             }
         else:
-            log(f"Claude Code error: {result.stderr}")
+            log(f"Claude Code error - stderr: {result.stderr}")
+            log(f"Claude Code error - stdout: {result.stdout[:500] if result.stdout else 'empty'}")
             return {
                 'success': False,
                 'error': f'Claude Code failed: {result.stderr[:300]}',
