@@ -26,11 +26,56 @@ MAC_TOOLS = [
     {"name": "execute_mac_command", "description": "Execute a shell command on the Mac", "input_schema": {"type": "object", "properties": {"command": {"type": "string", "description": "Shell command"}}, "required": ["command"]}},
     {"name": "execute_applescript", "description": "Execute AppleScript to control Mac applications", "input_schema": {"type": "object", "properties": {"script": {"type": "string", "description": "AppleScript code"}}, "required": ["script"]}},
     {"name": "read_mac_file", "description": "Read file contents", "input_schema": {"type": "object", "properties": {"filepath": {"type": "string"}}, "required": ["filepath"]}},
-    {"name": "take_screenshot", "description": "Take a screenshot. Modes: 'full' (entire screen), 'window' (specific app window, requires app_name like 'Google Chrome'), 'region' (specific coordinates, requires region with x, y, width, height). FOR PINTEREST WORKFLOW: Use 'window' mode with app_name='Google Chrome' to capture the entire browser window showing all pins. This is more reliable than regional screenshots. You can take ONE window screenshot showing multiple pins and include all their URLs in the metadata description field. Regional screenshots often fail on macOS due to coordinate system issues. Optional: include 'metadata' object with additional info like 'url', 'title', 'description' to attach to the screenshot.", "input_schema": {"type": "object", "properties": {"mode": {"type": "string", "enum": ["full", "window", "region"], "description": "Screenshot mode"}, "app_name": {"type": "string", "description": "Application name for window mode"}, "region": {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}, "width": {"type": "integer"}, "height": {"type": "integer"}}, "description": "Region coordinates"}, "metadata": {"type": "object", "properties": {"url": {"type": "string", "description": "URL associated with this screenshot (e.g., Pinterest pin link)"}, "title": {"type": "string", "description": "Title or description"}, "description": {"type": "string", "description": "Additional context"}}, "description": "Optional metadata to attach to screenshot"}}, "required": []}},
+    {"name": "take_screenshot", "description": """Take a screenshot. Modes:
+- 'full': entire screen
+- 'window': specific app window (requires app_name like 'Google Chrome')
+- 'region': specific screen coordinates (requires region object)
+
+FOR REGION MODE - CRITICAL COORDINATE CONVERSION:
+Coordinates MUST be SCREEN coordinates, NOT viewport coordinates.
+When getting element positions from JavaScript, you MUST add window.screenX and window.screenY:
+
+CORRECT way to get region coords:
+const rect = element.getBoundingClientRect();
+const region = {
+    x: Math.round(rect.left + window.screenX),
+    y: Math.round(rect.top + window.screenY),
+    width: Math.round(rect.width),
+    height: Math.round(rect.height)
+};
+
+WRONG (will capture wrong area):
+const region = {x: rect.left, y: rect.top, ...}  // Missing screenX/screenY!
+
+FOR PINTEREST/GENERAL WORKFLOW:
+- Use 'window' mode with app_name='Google Chrome' for full browser capture (most reliable)
+- Only use 'region' mode if you need a specific element AND properly convert coordinates
+
+Optional: include 'metadata' object with 'url', 'title', 'description' to attach to screenshot.""",
+     "input_schema": {"type": "object", "properties": {"mode": {"type": "string", "enum": ["full", "window", "region"], "description": "Screenshot mode"}, "app_name": {"type": "string", "description": "Application name for window mode"}, "region": {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}, "width": {"type": "integer"}, "height": {"type": "integer"}}, "description": "Region coordinates - MUST be screen coords (add window.screenX/Y to viewport coords)"}, "metadata": {"type": "object", "properties": {"url": {"type": "string"}, "title": {"type": "string"}, "description": {"type": "string"}}}}, "required": []}},
     {"name": "list_windows", "description": "List all open windows with their application names", "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "get_window_bounds", "description": "Get the position and size of a specific application window", "input_schema": {"type": "object", "properties": {"app_name": {"type": "string", "description": "Application name"}}, "required": ["app_name"]}},
     {"name": "scroll_page", "description": "Scroll the page in the specified application. Direction: 'down' or 'up'. Amount: number of times to press arrow key (default 3)", "input_schema": {"type": "object", "properties": {"app_name": {"type": "string", "description": "Application name (default: Google Chrome)"}, "direction": {"type": "string", "enum": ["down", "up"], "description": "Scroll direction"}, "amount": {"type": "integer", "description": "Number of times to scroll (default 3)"}}, "required": []}},
-    {"name": "execute_javascript_in_chrome", "description": "Execute JavaScript code in the active Chrome tab. Returns the result. Useful for extracting page data, URLs, element positions, etc. IMPORTANT for Pinterest: (1) FIRST check if page is loaded with document.readyState === 'complete'. (2) To SEARCH, use the search input on the page - find it with document.querySelector('input[data-test-id=\"search-box-input\"]') or document.querySelector('input[name=\"searchBoxInput\"]'), set its value, and trigger Enter key. DO NOT use browser address bar for searching. (3) After search, WAIT 5+ seconds before checking for results. (4) To find pin IMAGE containers (not sidebar links): document.querySelectorAll('[data-test-id=\"pin\"], [data-test-id=\"pinWrapper\"], div[class*=\"pinWrapper\"]'). Get parent anchor tag for URL. Example: Array.from(document.querySelectorAll('[data-test-id=\"pin\"]')).slice(0,5).map(pin => {const a = pin.closest('a') || pin.querySelector('a[href*=\"/pin/\"]'); return {url: a?.href || 'no-url'}})", "input_schema": {"type": "object", "properties": {"js_code": {"type": "string", "description": "JavaScript code to execute"}}, "required": ["js_code"]}},
+    {"name": "execute_javascript_in_chrome", "description": """Execute JavaScript code in the active Chrome tab. Returns the result.
+
+IMPORTANT for getting SCREEN COORDINATES for screenshots:
+To get an element's position for take_screenshot region mode, you MUST convert viewport coords to screen coords:
+
+// Get element screen position (for take_screenshot region mode)
+const el = document.querySelector('your-selector');
+const rect = el.getBoundingClientRect();
+JSON.stringify({
+    x: Math.round(rect.left + window.screenX),
+    y: Math.round(rect.top + window.screenY),
+    width: Math.round(rect.width),
+    height: Math.round(rect.height)
+});
+
+For Pinterest:
+- To SEARCH: find input with document.querySelector('input[data-test-id="search-box-input"]'), set value, trigger Enter
+- To find pins: document.querySelectorAll('[data-test-id="pin"]')
+- Get pin URLs: pin.closest('a')?.href""",
+     "input_schema": {"type": "object", "properties": {"js_code": {"type": "string", "description": "JavaScript code to execute"}}, "required": ["js_code"]}},
     {"name": "wait", "description": "Wait for a specified number of seconds. Use this to allow pages to load, search results to appear, or animations to complete.", "input_schema": {"type": "object", "properties": {"seconds": {"type": "integer", "description": "Number of seconds to wait (1-30)"}}, "required": ["seconds"]}},
     {"name": "kill_mac_agent", "description": "Kill and restart the Mac agent process. Use this if the agent is stuck or not responding.", "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "check_mac_status", "description": "Check if Mac is online", "input_schema": {"type": "object", "properties": {}, "required": []}}
