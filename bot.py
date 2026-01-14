@@ -20,7 +20,6 @@ if not TELEGRAM_TOKEN or not CLAUDE_API_KEY:
 
 claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 user_conversations = {}
-# Store metadata for screenshots temporarily
 screenshot_metadata = {}
 
 MAC_TOOLS = [
@@ -75,7 +74,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_conversations[user_id] = []
-    # Clear any pending screenshot metadata
     if user_id in screenshot_metadata:
         screenshot_metadata[user_id] = []
     await update.message.reply_text("Cleared!")
@@ -83,8 +81,6 @@ async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def restart_mac_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Kill and restart the Mac agent and clear conversation"""
     user_id = update.effective_user.id
-
-    # Send confirmation message first
     await update.message.reply_text(
         "🔄 Restarting system...\n\n"
         "⚠️ This will:\n"
@@ -92,8 +88,6 @@ async def restart_mac_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Clear your conversation history\n"
         "• Require manual restart of Mac agent"
     )
-
-    # Step 1: Check what's currently running on Mac
     status_msg = "📊 Checking active processes...\n"
     try:
         check_result = call_mac("execute", command="ps aux | grep -E 'agent.py|screencapture|osascript' | grep -v grep | wc -l")
@@ -102,30 +96,18 @@ async def restart_mac_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
             status_msg += f"• Found {process_count} Mac agent process(es)\n"
     except:
         status_msg += "• Unable to check Mac processes\n"
-
-    # Step 2: Clear bot-side state immediately
     user_conversations[user_id] = []
     if user_id in screenshot_metadata:
         screenshot_metadata[user_id] = []
     status_msg += "• ✅ Conversation history cleared\n"
     status_msg += "• ✅ Screenshot queue cleared\n"
-
     await update.message.reply_text(status_msg)
-
-    # Step 3: Try to kill Mac agent processes
     await update.message.reply_text("🛑 Stopping Mac agent...")
-
     try:
-        # Kill agent and any subprocess
         kill_result = call_mac("execute", command="pkill -9 -f agent.py; pkill -9 screencapture; pkill -9 osascript")
-
-        # Give it a moment
         import asyncio
         await asyncio.sleep(1)
-
-        # Verify processes are stopped
         verify_result = call_mac("execute", command="ps aux | grep -E 'agent.py|screencapture|osascript' | grep -v grep | wc -l")
-
         if verify_result.get("success"):
             remaining = verify_result.get("stdout", "0").strip()
             if remaining == "0":
@@ -168,30 +150,22 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         user_conversations[user_id] = []
     if user_id not in screenshot_metadata:
         screenshot_metadata[user_id] = []
-
     user_conversations[user_id].append({"role": "user", "content": update.message.text})
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
         tools = MAC_TOOLS if (MAC_IP and MAC_PORT and MAC_SECRET) else None
         response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=4096, messages=user_conversations[user_id], tools=tools if tools else anthropic.NOT_GIVEN)
-
-        # Safety: limit tool use loops to prevent infinite screenshot loops
-        max_tool_loops = 10
-        tool_loop_count = 0
-
-        while response.stop_reason == "tool_use" and tool_loop_count < max_tool_loops:
-            tool_loop_count += 1
+        
+        while response.stop_reason == "tool_use":
             assistant_content = response.content
             user_conversations[user_id].append({"role": "assistant", "content": assistant_content})
             tool_results = []
             screenshots_to_send = []
-
             for block in assistant_content:
                 if block.type == "tool_use":
                     tool_name = block.name
                     tool_input = block.input
                     logger.info(f"Tool: {tool_name} - {tool_input}")
-
                     if tool_name == "execute_mac_command":
                         result = call_mac("execute", command=tool_input["command"])
                         tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
@@ -221,12 +195,10 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                         app_name = tool_input.get("app_name")
                         region = tool_input.get("region")
                         metadata = tool_input.get("metadata", {})
-
                         result = call_mac("screenshot", mode=mode, app_name=app_name, region=region)
                         if result.get("success") and result.get("filepath"):
                             image_result = call_mac("read_image", filepath=result["filepath"])
                             if image_result.get("success") and image_result.get("image_data"):
-                                # Store screenshot with metadata
                                 screenshot_data = {
                                     "data": image_result["image_data"],
                                     "mode": mode,
@@ -236,7 +208,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                                     "description": metadata.get("description")
                                 }
                                 screenshots_to_send.append(screenshot_data)
-
                                 tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_result["image_data"]}}, {"type": "text", "text": f"Screenshot captured ({mode} mode). Metadata: {json.dumps(metadata)}"}]})
                             else:
                                 tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps({"success": False, "error": "Failed to read"})})
@@ -248,44 +219,28 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     elif tool_name == "check_mac_status":
                         result = call_mac("ping")
                         tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
-
-            # Send screenshots with enhanced captions
             for idx, screenshot in enumerate(screenshots_to_send):
                 try:
                     screenshot_bytes = base64.b64decode(screenshot["data"])
                     caption_parts = [f"Screenshot {idx+1}"]
-
                     if screenshot.get("title"):
                         caption_parts.append(f"📌 {screenshot['title']}")
-
                     if screenshot.get("mode"):
                         caption_parts.append(f"({screenshot['mode']} mode)")
-
                     if screenshot.get("app"):
                         caption_parts.append(f"- {screenshot['app']}")
-
                     if screenshot.get("description"):
                         caption_parts.append(f"\n{screenshot['description']}")
-
                     if screenshot.get("url"):
                         caption_parts.append(f"\n🔗 {screenshot['url']}")
-
                     caption = " ".join(caption_parts)
-
                     await update.message.reply_photo(photo=io.BytesIO(screenshot_bytes), caption=caption)
                     logger.info(f"Screenshot {idx+1} sent with metadata: {screenshot.get('url', 'no url')}")
                 except Exception as e:
                     logger.error(f"Failed to send screenshot {idx+1}: {e}")
-
             user_conversations[user_id].append({"role": "user", "content": tool_results})
             response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=4096, messages=user_conversations[user_id], tools=tools if tools else anthropic.NOT_GIVEN)
-
-        # Check if we hit the loop limit
-        if tool_loop_count >= max_tool_loops:
-            await update.message.reply_text(f"⚠️ Process stopped after {max_tool_loops} tool loops to prevent infinite loop. Use /restart to reset.")
-            user_conversations[user_id] = []  # Clear conversation
-            return
-
+        
         assistant_message = ""
         for block in response.content:
             if hasattr(block, "text"):
