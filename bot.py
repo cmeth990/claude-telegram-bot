@@ -226,4 +226,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(assistant_message)
     except Exception as e:
         logger.error(f"Error: {e}")
-        await update.message.reply_text(f"Error: {
+        await update.message.reply_text(f"Error: {str(e)}")
+
+def main():
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("clear", clear_history))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    logger.info("Starting bot...")
+    logger.info(f"Mac: {MAC_IP}:{MAC_PORT}")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
