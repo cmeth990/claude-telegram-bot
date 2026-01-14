@@ -106,8 +106,153 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                             image_result = call_mac('read_image', filepath=result['filepath'])
                             if image_result.get('success') and image_result.get('image_data'):
                                 screenshot_data = image_result['image_data']
-                                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps({'success': True, 'message': 'Screenshot captured'})})
-                                user_conversations[user_id].append({"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_result['image_data']}}, {"type": "text", "text": "Here is the screenshot. Please analyze it."}]})
+                                tool_results.append({
+                                    "type": "tool_result", 
+                                    "tool_use_id": block.id, 
+                                    "content": [
+                                        {
+                                            "type": "image",
+                                            "source": {
+                                                "type": "base64",
+                                                "media_type": "image/png",
+                                                "data": image_result['image_data']
+                                            }
+                                        },
+                                        {
+                                            "type": "text",
+                                            "text": "Screenshot captured successfully. Please analyze what you see."
+                                        }
+                                    ]
+                                })
+                            else:
+                                tool_results.append({"type": "tool_result",
+cd ~/claude_telegram_bot && cat > bot.py << 'ENDOFFILE'
+#!/usr/bin/env python3
+import os, logging, json, socket, base64, io
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+import anthropic
+from pathlib import Path
+
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+CLAUDE_API_KEY = os.environ.get('CLAUDE_API_KEY')
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+MAC_IP = os.environ.get('MAC_IP', '')
+MAC_PORT = int(os.environ.get('MAC_PORT', '0'))
+MAC_SECRET = os.environ.get('MAC_SECRET', '')
+
+if not TELEGRAM_TOKEN or not CLAUDE_API_KEY:
+    raise ValueError("Missing TELEGRAM_BOT_TOKEN or CLAUDE_API_KEY")
+
+claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+user_conversations = {}
+
+MAC_TOOLS = [
+    {"name": "execute_mac_command", "description": "Execute a shell command on the user's Mac", "input_schema": {"type": "object", "properties": {"command": {"type": "string", "description": "Shell command to execute"}}, "required": ["command"]}},
+    {"name": "execute_applescript", "description": "Execute AppleScript to control Mac applications", "input_schema": {"type": "object", "properties": {"script": {"type": "string", "description": "AppleScript code"}}, "required": ["script"]}},
+    {"name": "read_mac_file", "description": "Read file contents (50KB limit, home directory only)", "input_schema": {"type": "object", "properties": {"filepath": {"type": "string", "description": "File path (~ for home)"}}, "required": ["filepath"]}},
+    {"name": "take_screenshot", "description": "Take screenshot and return for analysis", "input_schema": {"type": "object", "properties": {}, "required": []}},
+    {"name": "check_mac_status", "description": "Check Mac online status", "input_schema": {"type": "object", "properties": {}, "required": []}}
+]
+
+def call_mac(action, **kwargs):
+    if not MAC_IP or not MAC_PORT or not MAC_SECRET:
+        return {'success': False, 'error': 'Mac agent not configured'}
+    try:
+        request = {'secret': MAC_SECRET, 'action': action, **kwargs}
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(30.0)
+        sock.connect((MAC_IP, MAC_PORT))
+        sock.sendall(json.dumps(request).encode('utf-8'))
+        response_chunks = []
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            response_chunks.append(chunk)
+        sock.close()
+        return json.loads(b''.join(response_chunks).decode('utf-8'))
+    except socket.timeout:
+        return {'success': False, 'error': 'Connection timed out'}
+    except ConnectionRefusedError:
+        return {'success': False, 'error': 'Connection refused'}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_conversations[user_id] = []
+    mac_status = "Offline"
+    if MAC_IP and MAC_PORT and MAC_SECRET:
+        if call_mac('ping').get('success'):
+            mac_status = "Online"
+    await update.message.reply_text(f"Welcome to Claude AI Bot with Mac Control!\n\nMac Status: {mac_status}\n\nCommands: /start /clear /help")
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start(update, context)
+
+async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_conversations[update.effective_user.id] = []
+    await update.message.reply_text("Conversation cleared!")
+
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in user_conversations:
+        user_conversations[user_id] = []
+    user_conversations[user_id].append({"role": "user", "content": update.message.text})
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    try:
+        tools = MAC_TOOLS if (MAC_IP and MAC_PORT and MAC_SECRET) else None
+        response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=4096, messages=user_conversations[user_id], tools=tools if tools else anthropic.NOT_GIVEN)
+        
+        while response.stop_reason == "tool_use":
+            assistant_content = response.content
+            user_conversations[user_id].append({"role": "assistant", "content": assistant_content})
+            tool_results = []
+            screenshot_data = None
+            
+            for block in assistant_content:
+                if block.type == "tool_use":
+                    tool_name = block.name
+                    tool_input = block.input
+                    logger.info(f"Tool: {tool_name}")
+                    
+                    if tool_name == "execute_mac_command":
+                        result = call_mac('execute', command=tool_input['command'])
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "execute_applescript":
+                        result = call_mac('applescript', script=tool_input['script'])
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "read_mac_file":
+                        result = call_mac('read_file', filepath=tool_input['filepath'])
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "take_screenshot":
+                        result = call_mac('screenshot')
+                        if result.get('success') and result.get('filepath'):
+                            image_result = call_mac('read_image', filepath=result['filepath'])
+                            if image_result.get('success') and image_result.get('image_data'):
+                                screenshot_data = image_result['image_data']
+                                tool_results.append({
+                                    "type": "tool_result", 
+                                    "tool_use_id": block.id, 
+                                    "content": [
+                                        {
+                                            "type": "image",
+                                            "source": {
+                                                "type": "base64",
+                                                "media_type": "image/png",
+                                                "data": image_result['image_data']
+                                            }
+                                        },
+                                        {
+                                            "type": "text",
+                                            "text": "Screenshot captured successfully. Please analyze what you see."
+                                        }
+                                    ]
+                                })
                             else:
                                 tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps({'success': False, 'error': 'Failed to read screenshot'})})
                         else:
