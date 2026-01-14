@@ -22,11 +22,13 @@ claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 user_conversations = {}
 
 MAC_TOOLS = [
-    {"name": "execute_mac_command", "description": "Execute a shell command", "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-    {"name": "execute_applescript", "description": "Execute AppleScript", "input_schema": {"type": "object", "properties": {"script": {"type": "string"}}, "required": ["script"]}},
-    {"name": "read_mac_file", "description": "Read file", "input_schema": {"type": "object", "properties": {"filepath": {"type": "string"}}, "required": ["filepath"]}},
-    {"name": "take_screenshot", "description": "Take screenshot", "input_schema": {"type": "object", "properties": {}, "required": []}},
-    {"name": "check_mac_status", "description": "Check Mac status", "input_schema": {"type": "object", "properties": {}, "required": []}}
+    {"name": "execute_mac_command", "description": "Execute a shell command on the Mac", "input_schema": {"type": "object", "properties": {"command": {"type": "string", "description": "Shell command"}}, "required": ["command"]}},
+    {"name": "execute_applescript", "description": "Execute AppleScript to control Mac applications", "input_schema": {"type": "object", "properties": {"script": {"type": "string", "description": "AppleScript code"}}, "required": ["script"]}},
+    {"name": "read_mac_file", "description": "Read file contents", "input_schema": {"type": "object", "properties": {"filepath": {"type": "string"}}, "required": ["filepath"]}},
+    {"name": "take_screenshot", "description": "Take a screenshot. Modes: 'full' (entire screen), 'window' (specific app window, requires app_name like 'Google Chrome' or 'Safari'), 'region' (specific coordinates, requires region with x, y, width, height)", "input_schema": {"type": "object", "properties": {"mode": {"type": "string", "enum": ["full", "window", "region"], "description": "Screenshot mode"}, "app_name": {"type": "string", "description": "Application name for window mode (e.g. 'Google Chrome', 'Safari')"}, "region": {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}, "width": {"type": "integer"}, "height": {"type": "integer"}}, "description": "Region coordinates for region mode"}}, "required": []}},
+    {"name": "list_windows", "description": "List all open windows with their application names. Useful for finding window names before taking window-specific screenshots.", "input_schema": {"type": "object", "properties": {}, "required": []}},
+    {"name": "get_window_bounds", "description": "Get the position and size of a specific application window", "input_schema": {"type": "object", "properties": {"app_name": {"type": "string", "description": "Application name"}}, "required": ["app_name"]}},
+    {"name": "check_mac_status", "description": "Check if Mac is online", "input_schema": {"type": "object", "properties": {}, "required": []}}
 ]
 
 def call_mac(action, **kwargs):
@@ -81,13 +83,13 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             assistant_content = response.content
             user_conversations[user_id].append({"role": "assistant", "content": assistant_content})
             tool_results = []
-            screenshot_data = None
+            screenshots_to_send = []
             
             for block in assistant_content:
                 if block.type == "tool_use":
                     tool_name = block.name
                     tool_input = block.input
-                    logger.info(f"Tool: {tool_name}")
+                    logger.info(f"Tool: {tool_name} - {tool_input}")
                     
                     if tool_name == "execute_mac_command":
                         result = call_mac("execute", command=tool_input["command"])
@@ -98,13 +100,22 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     elif tool_name == "read_mac_file":
                         result = call_mac("read_file", filepath=tool_input["filepath"])
                         tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "list_windows":
+                        result = call_mac("list_windows")
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "get_window_bounds":
+                        result = call_mac("get_window_bounds", app_name=tool_input["app_name"])
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
                     elif tool_name == "take_screenshot":
-                        result = call_mac("screenshot")
+                        mode = tool_input.get("mode", "full")
+                        app_name = tool_input.get("app_name")
+                        region = tool_input.get("region")
+                        result = call_mac("screenshot", mode=mode, app_name=app_name, region=region)
                         if result.get("success") and result.get("filepath"):
                             image_result = call_mac("read_image", filepath=result["filepath"])
                             if image_result.get("success") and image_result.get("image_data"):
-                                screenshot_data = image_result["image_data"]
-                                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_result["image_data"]}}, {"type": "text", "text": "Screenshot captured. Please analyze."}]})
+                                screenshots_to_send.append({"data": image_result["image_data"], "mode": mode, "app": app_name})
+                                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_result["image_data"]}}, {"type": "text", "text": f"Screenshot captured ({mode} mode). Please analyze."}]})
                             else:
                                 tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps({"success": False, "error": "Failed to read"})})
                         else:
@@ -113,13 +124,18 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                         result = call_mac("ping")
                         tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
             
-            if screenshot_data:
+            for idx, screenshot in enumerate(screenshots_to_send):
                 try:
-                    screenshot_bytes = base64.b64decode(screenshot_data)
-                    await update.message.reply_photo(photo=io.BytesIO(screenshot_bytes), caption="Screenshot")
-                    logger.info("Screenshot sent")
+                    screenshot_bytes = base64.b64decode(screenshot["data"])
+                    caption = f"Screenshot {idx+1}"
+                    if screenshot.get("mode"):
+                        caption += f" ({screenshot['mode']} mode)"
+                    if screenshot.get("app"):
+                        caption += f" - {screenshot['app']}"
+                    await update.message.reply_photo(photo=io.BytesIO(screenshot_bytes), caption=caption)
+                    logger.info(f"Screenshot {idx+1} sent")
                 except Exception as e:
-                    logger.error(f"Failed to send: {e}")
+                    logger.error(f"Failed to send screenshot {idx+1}: {e}")
             
             user_conversations[user_id].append({"role": "user", "content": tool_results})
             response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=4096, messages=user_conversations[user_id], tools=tools if tools else anthropic.NOT_GIVEN)
