@@ -1,289 +1,347 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta name="viewport" content="width=device-width, initial-scale=0.75, maximum-scale=5.0, user-scalable=yes" />
-        <script async src="https://www.googletagmanager.com/gtag/js?id=G-S72LBY47R8"></script>
-    <script>
-      window.dataLayer = window.dataLayer || [];
-      function gtag(){dataLayer.push(arguments);}
-      gtag('js', new Date());
-      gtag('config', "G-S72LBY47R8");
-    </script>
-    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
-    <title>Pastebin.com - Not Found (#404)</title>
-    <link rel="shortcut icon" href="/favicon.ico" />
-    <meta name="description" content="Pastebin.com is the number one paste tool since 2002. Pastebin is a website where you can store text online for a set period of time." />
-    <meta property="og:description" content="Pastebin.com is the number one paste tool since 2002. Pastebin is a website where you can store text online for a set period of time." />
-            <meta property="fb:app_id" content="231493360234820" />
-    <meta property="og:title" content="Pastebin.com - Not Found (#404)" />
-    <meta property="og:type" content="article" />
-    <meta property="og:url" content="https://pastebin.com/raw/placeholder" />
-    <meta property="og:image" content="https://pastebin.com/i/facebook.png" />
-    <meta property="og:site_name" content="Pastebin" />
-    <meta name="google-site-verification" content="jkUAIOE8owUXu8UXIhRLB9oHJsWBfOgJbZzncqHoF4A" />
-    <link rel="canonical" href="https://pastebin.com/raw/placeholder" />
-        <meta name="csrf-param" content="_csrf-frontend">
-<meta name="csrf-token" content="ZZywADvX8Zthqz75dDndCXz6VHnKgu3s_yDONstBojZR1eB2c7m18CfZeLc3cp9sNsMsKb3hp4upbaJgvHnvfg==">
+#!/usr/bin/env python3
+import os, logging, json, socket, base64, io
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+import anthropic
+from pathlib import Path
 
-<link href="/assets/c80611c4/css/bootstrap.min.css" rel="stylesheet">
-<link href="/assets/d65ff796/dist/bootstrap-tagsinput.css" rel="stylesheet">        
-<link href="/themes/pastebin/css/vendors.bundle.css?30d6ece6979ee0cf5531" rel="stylesheet">
-<link href="/themes/pastebin/css/app.bundle.css?30d6ece6979ee0cf5531" rel="stylesheet">
-    </head>
-<body class="night-auto " data-pr="EykQt2a9" data-pa="" data-sar="1" data-abd="1" data-bd="1">
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
 
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+MAC_IP = os.environ.get("MAC_IP", "")
+MAC_PORT = int(os.environ.get("MAC_PORT", "0"))
+MAC_SECRET = os.environ.get("MAC_SECRET", "")
 
-<svg style="height: 0; width: 0; position: absolute; visibility: hidden" xmlns="http://www.w3.org/2000/svg">
-    <symbol id="add" viewBox="0 0 1024 1024"><path fill="#ccc" d="M512 16C238 16 16 238 16 512s222 496 496 496 496-222 496-496S786 16 512 16z m288 552c0 13.2-10.8 24-24 24h-184v184c0 13.2-10.8 24-24 24h-112c-13.2 0-24-10.8-24-24v-184h-184c-13.2 0-24-10.8-24-24v-112c0-13.2 10.8-24 24-24h184v-184c0-13.2 10.8-24 24-24h112c13.2 0 24 10.8 24 24v184h184c13.2 0 24 10.8 24 24v112z"/></symbol>
-    <symbol id="search" viewBox="0 0 512 512"><path fill="#ccc" d="M354.2,216c0-38.2-13-70.7-40-97.7c-27-27-59.6-40-97.7-40s-70.7,13-97.7,40s-40,59.6-40,97.7 s13,70.7,40,97.7s59.6,40,97.7,40s70.7-13,97.7-40C340.2,285.8,354.2,253.2,354.2,216z M511.5,472c0,10.2-3.7,19.5-12.1,27.9 c-8.4,8.4-16.8,12.1-27.9,12.1c-11.2,0-20.5-3.7-27.9-12.1L339.3,393.8c-37.2,26.1-78.2,38.2-122.9,38.2 c-29.8,0-57.7-5.6-83.8-16.8c-27-11.2-50.3-27-68.9-46.5s-34.4-42.8-46.5-68.9C6.1,272.8,0.5,244.8,0.5,216s5.6-57.7,16.8-83.8 c11.2-27,27-50.3,46.5-68.9s42.8-34.4,68.9-46.5C159.7,5.6,187.6,0,216.4,0s57.7,5.6,83.8,16.8c27,11.2,50.3,27,68.9,46.5 c18.6,19.5,34.4,42.8,46.5,68.9c11.2,27,16.8,54.9,16.8,83.8c0,44.7-13,85.6-38.2,122.9L499.4,444 C507.8,451.5,511.5,460.8,511.5,472z"/></g></symbol>
-</svg>
-<div class="wrap">
+if not TELEGRAM_TOKEN or not CLAUDE_API_KEY:
+    raise ValueError("Missing TELEGRAM_BOT_TOKEN or CLAUDE_API_KEY")
 
-        
-        
-<div class="header">
-    <div class="container">
-        <div class="header__container">
+claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+user_conversations = {}
+# Store metadata for screenshots temporarily
+screenshot_metadata = {}
 
-                        <div class="header__left">
-                <a class="header__logo" href="/">
-                    Pastebin                </a>
+MAC_TOOLS = [
+    {"name": "execute_mac_command", "description": "Execute a shell command on the Mac", "input_schema": {"type": "object", "properties": {"command": {"type": "string", "description": "Shell command"}}, "required": ["command"]}},
+    {"name": "execute_applescript", "description": "Execute AppleScript to control Mac applications", "input_schema": {"type": "object", "properties": {"script": {"type": "string", "description": "AppleScript code"}}, "required": ["script"]}},
+    {"name": "read_mac_file", "description": "Read file contents", "input_schema": {"type": "object", "properties": {"filepath": {"type": "string"}}, "required": ["filepath"]}},
+    {"name": "take_screenshot", "description": "Take a screenshot. Modes: 'full' (entire screen), 'window' (specific app window, requires app_name like 'Google Chrome'), 'region' (specific coordinates, requires region with x, y, width, height). Optional: include 'metadata' object with additional info like 'url', 'title', 'description' to attach to the screenshot.", "input_schema": {"type": "object", "properties": {"mode": {"type": "string", "enum": ["full", "window", "region"], "description": "Screenshot mode"}, "app_name": {"type": "string", "description": "Application name for window mode"}, "region": {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}, "width": {"type": "integer"}, "height": {"type": "integer"}}, "description": "Region coordinates"}, "metadata": {"type": "object", "properties": {"url": {"type": "string", "description": "URL associated with this screenshot (e.g., Pinterest pin link)"}, "title": {"type": "string", "description": "Title or description"}, "description": {"type": "string", "description": "Additional context"}}, "description": "Optional metadata to attach to screenshot"}}, "required": []}},
+    {"name": "list_windows", "description": "List all open windows with their application names", "input_schema": {"type": "object", "properties": {}, "required": []}},
+    {"name": "get_window_bounds", "description": "Get the position and size of a specific application window", "input_schema": {"type": "object", "properties": {"app_name": {"type": "string", "description": "Application name"}}, "required": ["app_name"]}},
+    {"name": "scroll_page", "description": "Scroll the page in the specified application. Direction: 'down' or 'up'. Amount: number of times to press arrow key (default 3)", "input_schema": {"type": "object", "properties": {"app_name": {"type": "string", "description": "Application name (default: Google Chrome)"}, "direction": {"type": "string", "enum": ["down", "up"], "description": "Scroll direction"}, "amount": {"type": "integer", "description": "Number of times to scroll (default 3)"}}, "required": []}},
+    {"name": "execute_javascript_in_chrome", "description": "Execute JavaScript code in the active Chrome tab. Returns the result. Useful for extracting page data, URLs, element positions, etc. IMPORTANT for Pinterest: Use this selector to find actual pin IMAGE containers (not sidebar links): document.querySelectorAll('[data-test-id=\"pin\"], [data-test-id=\"pinWrapper\"], div[class*=\"pinWrapper\"]'). Get parent anchor tag for URL. Example: Array.from(document.querySelectorAll('[data-test-id=\"pin\"]')).slice(0,5).map(pin => {const a = pin.closest('a') || pin.querySelector('a[href*=\"/pin/\"]'); const rect = pin.getBoundingClientRect(); return {url: a?.href || 'no-url', x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)}})", "input_schema": {"type": "object", "properties": {"js_code": {"type": "string", "description": "JavaScript code to execute"}}, "required": ["js_code"]}},
+    {"name": "kill_mac_agent", "description": "Kill and restart the Mac agent process. Use this if the agent is stuck or not responding.", "input_schema": {"type": "object", "properties": {}, "required": []}},
+    {"name": "check_mac_status", "description": "Check if Mac is online", "input_schema": {"type": "object", "properties": {}, "required": []}}
+]
 
-                <div class="header__links h_1024">
-                    
-                                        <a href="/doc_api">API</a>
-                    <a href="/tools">tools</a>
-                    <a href="/faq">faq</a>
-                                    </div>
+def call_mac(action, **kwargs):
+    if not MAC_IP or not MAC_PORT or not MAC_SECRET:
+        return {"success": False, "error": "Mac agent not configured"}
+    try:
+        request = {"secret": MAC_SECRET, "action": action, **kwargs}
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(30.0)
+        sock.connect((MAC_IP, MAC_PORT))
+        sock.sendall(json.dumps(request).encode("utf-8"))
+        response_chunks = []
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            response_chunks.append(chunk)
+        sock.close()
+        return json.loads(b"".join(response_chunks).decode("utf-8"))
+    except socket.timeout:
+        return {"success": False, "error": "Connection timed out"}
+    except ConnectionRefusedError:
+        return {"success": False, "error": "Connection refused"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
-                <a class="header__btn" href="/">
-                    <span>paste</span>
-                </a>
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_conversations[user_id] = []
+    mac_status = "Offline"
+    if MAC_IP and MAC_PORT and MAC_SECRET:
+        if call_mac("ping").get("success"):
+            mac_status = "Online"
+    await update.message.reply_text(f"Welcome!\n\nMac: {mac_status}\n\nCommands: /start /clear /help /restart")
 
-                
-                <div class="header__search">
-                                            <form id="w1" class="search_form" action="https://pastebin.com/search" method="get">
-                            
-<input type="text" id="q" class="search_input" name="q" maxlength="128" placeholder="Search...">
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start(update, context)
 
+async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_conversations[user_id] = []
+    # Clear any pending screenshot metadata
+    if user_id in screenshot_metadata:
+        screenshot_metadata[user_id] = []
+    await update.message.reply_text("Cleared!")
 
+async def restart_mac_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Kill and restart the Mac agent and clear conversation"""
+    user_id = update.effective_user.id
 
-                            <button type="submit" class="search_btn" aria-label="Search"><svg class="icon search"><use xlink:href="#search"></use></svg></button>
-                        </form>                                    </div>
+    # Send confirmation message first
+    await update.message.reply_text(
+        "🔄 Restarting system...\n\n"
+        "⚠️ This will:\n"
+        "• Stop all running processes\n"
+        "• Clear your conversation history\n"
+        "• Require manual restart of Mac agent"
+    )
 
-            </div>
+    # Step 1: Check what's currently running on Mac
+    status_msg = "📊 Checking active processes...\n"
+    try:
+        check_result = call_mac("execute", command="ps aux | grep -E 'agent.py|screencapture|osascript' | grep -v grep | wc -l")
+        if check_result.get("success"):
+            process_count = check_result.get("stdout", "0").strip()
+            status_msg += f"• Found {process_count} Mac agent process(es)\n"
+    except:
+        status_msg += "• Unable to check Mac processes\n"
 
-                        <div class="header__right">
+    # Step 2: Clear bot-side state immediately
+    user_conversations[user_id] = []
+    if user_id in screenshot_metadata:
+        screenshot_metadata[user_id] = []
+    status_msg += "• ✅ Conversation history cleared\n"
+    status_msg += "• ✅ Screenshot queue cleared\n"
 
-                                    <div class="header_sign">
-                        <a href="/login" class="btn-sign sign-in">Login</a>
-                        <a href="/signup" class="btn-sign sign-up">Sign up</a>
-                    </div>
-                
-            </div>
+    await update.message.reply_text(status_msg)
 
-        </div>
-    </div>
+    # Step 3: Try to kill Mac agent processes
+    await update.message.reply_text("🛑 Stopping Mac agent...")
 
-</div>
-        
+    try:
+        # Kill agent and any subprocess
+        kill_result = call_mac("execute", command="pkill -9 -f agent.py; pkill -9 screencapture; pkill -9 osascript")
 
-    <div class="container">
-        <div class="content">
+        # Give it a moment
+        import asyncio
+        await asyncio.sleep(1)
 
-                        
-                        
-                                    
-            
-            
-<div class="page -top -right">
+        # Verify processes are stopped
+        verify_result = call_mac("execute", command="ps aux | grep -E 'agent.py|screencapture|osascript' | grep -v grep | wc -l")
 
-    <div class="content__title">Not Found (#404)</div>
-    <div class="content__text">
-        <div class="notice -no-margin">
-            Page not found.        </div>
-    </div>
+        if verify_result.get("success"):
+            remaining = verify_result.get("stdout", "0").strip()
+            if remaining == "0":
+                await update.message.reply_text(
+                    "✅ All processes stopped!\n\n"
+                    "📋 Verification:\n"
+                    "• Mac agent: Stopped\n"
+                    "• Screenshot processes: Stopped\n"
+                    "• AppleScript processes: Stopped\n\n"
+                    "⚠️ To restart Mac agent:\n"
+                    "cd ~/claude_mac_agent && python3 agent.py"
+                )
+            else:
+                await update.message.reply_text(
+                    f"⚠️ Some processes still running ({remaining})\n\n"
+                    "Run manually:\n"
+                    "pkill -9 -f agent.py\n"
+                    "pkill -9 screencapture\n"
+                    "pkill -9 osascript\n\n"
+                    "Then restart:\n"
+                    "cd ~/claude_mac_agent && python3 agent.py"
+                )
+        else:
+            await update.message.reply_text(
+                "✅ Kill command sent!\n\n"
+                "⚠️ To restart Mac agent:\n"
+                "cd ~/claude_mac_agent && python3 agent.py"
+            )
+    except Exception as e:
+        logger.error(f"Restart error: {e}")
+        await update.message.reply_text(
+            "⚠️ Could not verify process status\n\n"
+            "Manually restart:\n"
+            "pkill -9 -f agent.py && cd ~/claude_mac_agent && python3 agent.py"
+        )
 
-</div>
-            <div style="clear: both;"></div>
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in user_conversations:
+        user_conversations[user_id] = []
+    if user_id not in screenshot_metadata:
+        screenshot_metadata[user_id] = []
 
-                                </div>
+    user_conversations[user_id].append({"role": "user", "content": update.message.text})
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    try:
+        tools = MAC_TOOLS if (MAC_IP and MAC_PORT and MAC_SECRET) else None
+        response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=4096, messages=user_conversations[user_id], tools=tools if tools else anthropic.NOT_GIVEN)
 
-        <div class="sidebar h_1024">
-            
+        # Safety: limit tool use loops to prevent infinite screenshot loops
+        max_tool_loops = 10
+        tool_loop_count = 0
 
+        while response.stop_reason == "tool_use" and tool_loop_count < max_tool_loops:
+            tool_loop_count += 1
+            assistant_content = response.content
+            user_conversations[user_id].append({"role": "assistant", "content": assistant_content})
+            tool_results = []
+            screenshots_to_send = []
 
+            for block in assistant_content:
+                if block.type == "tool_use":
+                    tool_name = block.name
+                    tool_input = block.input
+                    logger.info(f"Tool: {tool_name} - {tool_input}")
 
-                
-    <div class="sidebar__title">
-        <a href="/archive">Public Pastes</a>
-    </div>
-    <ul class="sidebar__menu">
+                    if tool_name == "execute_mac_command":
+                        result = call_mac("execute", command=tool_input["command"])
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "execute_applescript":
+                        result = call_mac("applescript", script=tool_input["script"])
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "read_mac_file":
+                        result = call_mac("read_file", filepath=tool_input["filepath"])
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "list_windows":
+                        result = call_mac("list_windows")
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "get_window_bounds":
+                        result = call_mac("get_window_bounds", app_name=tool_input["app_name"])
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "scroll_page":
+                        app_name = tool_input.get("app_name", "Google Chrome")
+                        direction = tool_input.get("direction", "down")
+                        amount = tool_input.get("amount", 3)
+                        result = call_mac("scroll", app_name=app_name, direction=direction, amount=amount)
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "execute_javascript_in_chrome":
+                        result = call_mac("execute_js", js_code=tool_input["js_code"])
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "take_screenshot":
+                        mode = tool_input.get("mode", "full")
+                        app_name = tool_input.get("app_name")
+                        region = tool_input.get("region")
+                        metadata = tool_input.get("metadata", {})
 
-                    <li>
-                <a href="/XgAkQvNC?source=public_pastes">Untitled</a>
-                <div class="details">
-                    
-                    38 min ago
-                    | 16.69 KB                </div>
-            </li>
-                    <li>
-                <a href="/0rBKqVVA?source=public_pastes">Reads city&#039;s construction orders in thre...</a>
-                <div class="details">
-                    
-                    1 hour ago
-                    | 2.17 KB                </div>
-            </li>
-                    <li>
-                <a href="/e2kcr0DP?source=public_pastes">Feels weather through floor</a>
-                <div class="details">
-                    
-                    1 hour ago
-                    | 0.28 KB                </div>
-            </li>
-                    <li>
-                <a href="/cbLXDHcy?source=public_pastes">Untitled</a>
-                <div class="details">
-                    
-                    2 hours ago
-                    | 16.33 KB                </div>
-            </li>
-                    <li>
-                <a href="/qVitXJVm?source=public_pastes">Zzz</a>
-                <div class="details">
-                    
-                    3 hours ago
-                    | 0.62 KB                </div>
-            </li>
-                    <li>
-                <a href="/MHKs9Rsk?source=public_pastes">ffix_playthrough</a>
-                <div class="details">
-                    
-                    4 hours ago
-                    | 1.26 KB                </div>
-            </li>
-                    <li>
-                <a href="/BPwHPAx2?source=public_pastes">Untitled</a>
-                <div class="details">
-                    
-                    4 hours ago
-                    | 20.93 KB                </div>
-            </li>
-                    <li>
-                <a href="/jZJBuRkV?source=public_pastes">Untitled</a>
-                <div class="details">
-                    
-                    6 hours ago
-                    | 22.26 KB                </div>
-            </li>
-        
-    </ul>
-            
+                        result = call_mac("screenshot", mode=mode, app_name=app_name, region=region)
+                        if result.get("success") and result.get("filepath"):
+                            image_result = call_mac("read_image", filepath=result["filepath"])
+                            if image_result.get("success") and image_result.get("image_data"):
+                                # Store screenshot with metadata
+                                screenshot_data = {
+                                    "data": image_result["image_data"],
+                                    "mode": mode,
+                                    "app": app_name,
+                                    "url": metadata.get("url"),
+                                    "title": metadata.get("title"),
+                                    "description": metadata.get("description")
+                                }
+                                screenshots_to_send.append(screenshot_data)
 
-    <div class="sidebar__sticky -on">
-                    </div>
-        </div>
-    </div>
-</div>
+                                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_result["image_data"]}}, {"type": "text", "text": f"Screenshot captured ({mode} mode). Metadata: {json.dumps(metadata)}"}]})
+                            else:
+                                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps({"success": False, "error": "Failed to read"})})
+                        else:
+                            tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "kill_mac_agent":
+                        result = call_mac("kill_agent")
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "check_mac_status":
+                        result = call_mac("ping")
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
 
+            # Send screenshots with enhanced captions
+            for idx, screenshot in enumerate(screenshots_to_send):
+                try:
+                    screenshot_bytes = base64.b64decode(screenshot["data"])
+                    caption_parts = [f"Screenshot {idx+1}"]
 
-    
-<div class="top-footer">
-    <a class="icon-link -size-24-24 -chrome" href="/tools#chrome" title="Google Chrome Extension"></a>
-    <a class="icon-link -size-24-24 -firefox" href="/tools#firefox" title="Firefox Extension"></a>
-    <a class="icon-link -size-24-24 -iphone" href="/tools#iphone" title="iPhone/iPad Application"></a>
-    <a class="icon-link -size-24-24 -windows" href="/tools#windows" title="Windows Desktop Application"></a>
-    <a class="icon-link -size-24-24 -android" href="/tools#android" title="Android Application"></a>
-    <a class="icon-link -size-24-24 -macos" href="/tools#macos" title="MacOS X Widget"></a>
-    <a class="icon-link -size-24-24 -opera" href="/tools#opera" title="Opera Extension"></a>
-    <a class="icon-link -size-24-24 -unix" href="/tools#pastebincl" title="Linux Application"></a>
-</div>
+                    if screenshot.get("title"):
+                        caption_parts.append(f"📌 {screenshot['title']}")
 
-<footer class="footer">
-    <div class="container">
-        <div class="footer__container">
+                    if screenshot.get("mode"):
+                        caption_parts.append(f"({screenshot['mode']} mode)")
 
-            <div class="footer__left">
-                <a href="/">create new paste</a> <span class="footer__devider">&nbsp;/&nbsp;</span>
-                                <a href="/languages">syntax languages</a> <span class="footer__devider">&nbsp;/&nbsp;</span>
-                <a href="/archive">archive</a> <span class="footer__devider">&nbsp;/&nbsp;</span>
-                <a href="/faq">faq</a> <span class="footer__devider">&nbsp;/&nbsp;</span>
-                <a href="/tools">tools</a> <span class="footer__devider">&nbsp;/&nbsp;</span>
-                <a href="/night_mode">night mode</a> <span class="footer__devider">&nbsp;/&nbsp;</span>
-                <a href="/doc_api">api</a> <span class="footer__devider">&nbsp;/&nbsp;</span>
-                <a href="/doc_scraping_api">scraping api</a> <span class="footer__devider">&nbsp;/&nbsp;</span>
-                <a href="/news">news</a> <span class="footer__devider">&nbsp;/&nbsp;</span>
-                <a href="/pro" class="pro">pro</a>
+                    if screenshot.get("app"):
+                        caption_parts.append(f"- {screenshot['app']}")
 
-                <br>
-                <a href="/doc_privacy_statement">privacy statement</a> <span class="footer__devider">&nbsp;/&nbsp;</span>
-                <a href="/doc_cookies_policy">cookies policy</a> <span class="footer__devider">&nbsp;/&nbsp;</span>
-                <a href="/doc_terms_of_service">terms of service</a><span class="footer__devider">&nbsp;/&nbsp;</span>
-                <a href="/doc_security_disclosure">security disclosure</a> <span class="footer__devider">&nbsp;/&nbsp;</span>
-                <a href="/dmca">dmca</a> <span class="footer__devider">&nbsp;/&nbsp;</span>
-                <a href="/report-abuse">report abuse</a> <span class="footer__devider">&nbsp;/&nbsp;</span>
-                <a href="/contact">contact</a>
+                    if screenshot.get("description"):
+                        caption_parts.append(f"\n{screenshot['description']}")
 
-                <br>
+                    if screenshot.get("url"):
+                        caption_parts.append(f"\n🔗 {screenshot['url']}")
 
-                                
-                <br>
+                    caption = " ".join(caption_parts)
 
-                
-<span class="footer__bottom h_800">
-    By using Pastebin.com you agree to our <a href="/doc_cookies_policy">cookies policy</a> to enhance your experience.
-    <br>
-    Site design &amp; logo &copy; 2026 Pastebin</span>
-            </div>
+                    await update.message.reply_photo(photo=io.BytesIO(screenshot_bytes), caption=caption)
+                    logger.info(f"Screenshot {idx+1} sent with metadata: {screenshot.get('url', 'no url')}")
+                except Exception as e:
+                    logger.error(f"Failed to send screenshot {idx+1}: {e}")
 
-            <div class="footer__right h_1024">
-                                    <a class="icon-link -size-40-40 -facebook-circle" href="https://facebook.com/pastebin" rel="nofollow" title="Like us on Facebook" target="_blank"></a>
-                    <a class="icon-link -size-40-40 -twitter-circle" href="https://twitter.com/pastebin" rel="nofollow" title="Follow us on Twitter" target="_blank"></a>
-                            </div>
+            user_conversations[user_id].append({"role": "user", "content": tool_results})
+            response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=4096, messages=user_conversations[user_id], tools=tools if tools else anthropic.NOT_GIVEN)
 
-        </div>
-    </div>
-</footer>
-    
+        # Check if we hit the loop limit
+        if tool_loop_count >= max_tool_loops:
+            await update.message.reply_text(f"⚠️ Process stopped after {max_tool_loops} tool loops to prevent infinite loop. Use /restart to reset.")
+            user_conversations[user_id] = []  # Clear conversation
+            return
 
+        assistant_message = ""
+        for block in response.content:
+            if hasattr(block, "text"):
+                assistant_message += block.text
+        user_conversations[user_id].append({"role": "assistant", "content": assistant_message})
+        if len(user_conversations[user_id]) > 40:
+            user_conversations[user_id] = user_conversations[user_id][-40:]
+        if assistant_message:
+            await update.message.reply_text(assistant_message)
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+        await update.message.reply_text(f"Error: {str(e)}")
 
-    
-<div class="popup-container">
+async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Voice needs OPENAI_API_KEY")
 
-                <div class="popup-box -cookies" data-name="l2c_1">
-            We use cookies for various purposes including analytics. By continuing to use Pastebin, you agree to our use of cookies as described in the <a href="/doc_cookies_policy">Cookies Policy</a>.            &nbsp;<span class="cookie-button js-close-cookies">OK, I Understand</span>
-        </div>
-    
-                <div class="popup-box -pro" data-name="l2c_2_pg">
-            <div class="pro-promo-img">
-                <a href="/signup" aria-label="Sign Up">
-                    <img src="/themes/pastebin/img/hello.webp" alt=""/>
-                </a>
-            </div>
-            <div class="pro-promo-text">
-                Not a member of Pastebin yet?<br/>
-                <a href="/signup"><b>Sign Up</b></a>, it unlocks many cool features!            </div>
-            <div class="close js-close-pro-guest" title="Close Me">&nbsp;</div>
-        </div>
-    
-    
-    
-</div>
-    
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Document processing available")
 
-<span class="cd-top"></span>
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await update.message.reply_text("Analyzing...")
+    try:
+        photo = update.message.photo[-1]
+        photo_file = await photo.get_file()
+        photo_path = f"/tmp/photo_{user_id}.jpg"
+        await photo_file.download_to_drive(photo_path)
+        with open(photo_path, "rb") as f:
+            image_data = base64.standard_b64encode(f.read()).decode("utf-8")
+        if user_id not in user_conversations:
+            user_conversations[user_id] = []
+        caption = update.message.caption or "Analyze this"
+        user_conversations[user_id].append({"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_data}}, {"type": "text", "text": caption}]})
+        response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=2048, messages=user_conversations[user_id])
+        assistant_message = response.content[0].text
+        user_conversations[user_id].append({"role": "assistant", "content": assistant_message})
+        if os.path.exists(photo_path):
+            os.remove(photo_path)
+        await update.message.reply_text(assistant_message)
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        await update.message.reply_text(f"Error: {str(e)}")
 
-<script src="/assets/9ce1885/jquery.min.js"></script>
-<script src="/assets/f04f76b8/yii.js"></script>
-<script src="/assets/d65ff796/dist/bootstrap-tagsinput.js"></script>
-<script>
-    const POST_EXPIRATION_NEVER = 'N';
-    const POST_EXPIRATION_BURN = 'B';
-    const POST_STATUS_PUBLIC = '0';
-    const POST_STATUS_UNLISTED = '1';
-</script>
-<script src="/themes/pastebin/js/vendors.bundle.js?30d6ece6979ee0cf5531"></script>
-<script src="/themes/pastebin/js/app.bundle.js?30d6ece6979ee0cf5531"></script>
+def main():
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("clear", clear_history))
+    application.add_handler(CommandHandler("restart", restart_mac_agent))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    application.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    logger.info("Starting bot...")
+    logger.info(f"Mac: {MAC_IP}:{MAC_PORT}")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-</body>
-</html>
+if __name__ == "__main__":
+    main()
