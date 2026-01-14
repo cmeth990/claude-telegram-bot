@@ -1,24 +1,3 @@
-Check Mac status
-cd ~/claude_telegram_bot
-cp /tmp/claude_telegram_bot/bot_updated.py bot.py
-git add bot.py
-git commit -m "CRITICAL: Activate Chrome window before regional screenshots"
-git push origin main
-cd ~/claude_telegram_bot && cp /tmp/claude_telegram_bot/bot_updated.py bot.py && git add bot.py && git commit -m "Use window screenshots instead of regional for Pinterest - more reliable" && git push origin main
-```
-
-This changes the approach to:
-- ✅ Use `window` mode to capture the entire Chrome window
-- ✅ Extract all pin URLs via JavaScript
-- ✅ Include all URLs in the screenshot description/caption
-- ✅ Avoid the coordinate calculation issues entirely
-
-After Railway deploys, test with:
-```
-/clear
-
-Go to pinterest.com. Search "minimalist fashion". Wait 8 seconds. Extract 5 pin URLs using JavaScript. Take ONE window screenshot of Chrome with all the URLs listed in the description. Send it to me.
-cat > ~/claude_telegram_bot/bot.py << 'ENDOFFILE'
 #!/usr/bin/env python3
 import os, logging, json, socket, base64, io
 from telegram import Update
@@ -51,7 +30,7 @@ MAC_TOOLS = [
     {"name": "list_windows", "description": "List all open windows with their application names", "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "get_window_bounds", "description": "Get the position and size of a specific application window", "input_schema": {"type": "object", "properties": {"app_name": {"type": "string", "description": "Application name"}}, "required": ["app_name"]}},
     {"name": "scroll_page", "description": "Scroll the page in the specified application. Direction: 'down' or 'up'. Amount: number of times to press arrow key (default 3)", "input_schema": {"type": "object", "properties": {"app_name": {"type": "string", "description": "Application name (default: Google Chrome)"}, "direction": {"type": "string", "enum": ["down", "up"], "description": "Scroll direction"}, "amount": {"type": "integer", "description": "Number of times to scroll (default 3)"}}, "required": []}},
-    {"name": "execute_javascript_in_chrome", "description": "Execute JavaScript code in the active Chrome tab. Returns the result. Useful for extracting page data, URLs, element positions, etc. IMPORTANT for Pinterest: (1) FIRST check if page is loaded with document.readyState === 'complete'. (2) To SEARCH, use the search input on the page - find it with document.querySelector('input[data-test-id=\"search-box-input\"]') or document.querySelector('input[name=\"searchBoxInput\"]'), set its value, and trigger Enter key. DO NOT use browser address bar for searching. (3) After search, WAIT 5+ seconds before checking for results. (4) To find pin IMAGE containers (not sidebar links): document.querySelectorAll('[data-test-id=\"pin\"], [data-test-id=\"pinWrapper\"], div[class*=\"pinWrapper\"]'). Get parent anchor tag for URL. CRITICAL: To convert webpage coordinates to screen coordinates for screenshots, you MUST add BOTH the window position AND account for browser chrome (toolbars). Use this formula: screenX = rect.left + window.screenX + (window.outerWidth - window.innerWidth)/2, screenY = rect.top + window.screenY + (window.outerHeight - window.innerHeight) - (window.outerWidth - window.innerWidth)/2. Example: Array.from(document.querySelectorAll('[data-test-id=\"pin\"]')).slice(0,5).map(pin => {const a = pin.closest('a') || pin.querySelector('a[href*=\"/pin/\"]'); const rect = pin.getBoundingClientRect(); const chromeOffsetX = Math.round((window.outerWidth - window.innerWidth)/2); const chromeOffsetY = Math.round(window.outerHeight - window.innerHeight - chromeOffsetX); return {url: a?.href || 'no-url', x: Math.round(rect.left + window.screenX + chromeOffsetX), y: Math.round(rect.top + window.screenY + chromeOffsetY), width: Math.round(rect.width), height: Math.round(rect.height)}})", "input_schema": {"type": "object", "properties": {"js_code": {"type": "string", "description": "JavaScript code to execute"}}, "required": ["js_code"]}},
+    {"name": "execute_javascript_in_chrome", "description": "Execute JavaScript code in the active Chrome tab. Returns the result. Useful for extracting page data, URLs, element positions, etc. IMPORTANT for Pinterest: (1) FIRST check if page is loaded with document.readyState === 'complete'. (2) To SEARCH, use the search input on the page - find it with document.querySelector('input[data-test-id=\"search-box-input\"]') or document.querySelector('input[name=\"searchBoxInput\"]'), set its value, and trigger Enter key. DO NOT use browser address bar for searching. (3) After search, WAIT 5+ seconds before checking for results. (4) To find pin IMAGE containers (not sidebar links): document.querySelectorAll('[data-test-id=\"pin\"], [data-test-id=\"pinWrapper\"], div[class*=\"pinWrapper\"]'). Get parent anchor tag for URL. Example: Array.from(document.querySelectorAll('[data-test-id=\"pin\"]')).slice(0,5).map(pin => {const a = pin.closest('a') || pin.querySelector('a[href*=\"/pin/\"]'); return {url: a?.href || 'no-url'}})", "input_schema": {"type": "object", "properties": {"js_code": {"type": "string", "description": "JavaScript code to execute"}}, "required": ["js_code"]}},
     {"name": "wait", "description": "Wait for a specified number of seconds. Use this to allow pages to load, search results to appear, or animations to complete.", "input_schema": {"type": "object", "properties": {"seconds": {"type": "integer", "description": "Number of seconds to wait (1-30)"}}, "required": ["seconds"]}},
     {"name": "kill_mac_agent", "description": "Kill and restart the Mac agent process. Use this if the agent is stuck or not responding.", "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "check_mac_status", "description": "Check if Mac is online", "input_schema": {"type": "object", "properties": {}, "required": []}}
@@ -102,21 +81,21 @@ async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def restart_mac_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    await update.message.reply_text("🔄 Restarting system...\n\n⚠️ This will:\n• Stop all running processes\n• Clear your conversation history\n• Require manual restart of Mac agent")
-    status_msg = "📊 Checking active processes...\n"
+    await update.message.reply_text("Restarting system...\n\nThis will:\nStop all running processes\nClear your conversation history\nRequire manual restart of Mac agent")
+    status_msg = "Checking active processes...\n"
     try:
         check_result = call_mac("execute", command="ps aux | grep -E 'agent.py|screencapture|osascript' | grep -v grep | wc -l")
         if check_result.get("success"):
             process_count = check_result.get("stdout", "0").strip()
-            status_msg += f"• Found {process_count} Mac agent process(es)\n"
+            status_msg += f"Found {process_count} Mac agent process(es)\n"
     except:
-        status_msg += "• Unable to check Mac processes\n"
+        status_msg += "Unable to check Mac processes\n"
     user_conversations[user_id] = []
     if user_id in screenshot_metadata:
         screenshot_metadata[user_id] = []
-    status_msg += "• ✅ Conversation history cleared\n• ✅ Screenshot queue cleared\n"
+    status_msg += "Conversation history cleared\nScreenshot queue cleared\n"
     await update.message.reply_text(status_msg)
-    await update.message.reply_text("🛑 Stopping Mac agent...")
+    await update.message.reply_text("Stopping Mac agent...")
     try:
         kill_result = call_mac("execute", command="pkill -9 -f agent.py; pkill -9 screencapture; pkill -9 osascript")
         import asyncio
@@ -125,14 +104,14 @@ async def restart_mac_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if verify_result.get("success"):
             remaining = verify_result.get("stdout", "0").strip()
             if remaining == "0":
-                await update.message.reply_text("✅ All processes stopped!\n\n📋 Verification:\n• Mac agent: Stopped\n• Screenshot processes: Stopped\n• AppleScript processes: Stopped\n\n⚠️ To restart Mac agent:\ncd ~/claude_mac_agent && python3 agent.py")
+                await update.message.reply_text("All processes stopped!\n\nVerification:\nMac agent: Stopped\nScreenshot processes: Stopped\nAppleScript processes: Stopped\n\nTo restart Mac agent:\ncd ~/claude_mac_agent && python3 agent.py")
             else:
-                await update.message.reply_text(f"⚠️ Some processes still running ({remaining})\n\nRun manually:\npkill -9 -f agent.py\npkill -9 screencapture\npkill -9 osascript\n\nThen restart:\ncd ~/claude_mac_agent && python3 agent.py")
+                await update.message.reply_text(f"Some processes still running ({remaining})\n\nRun manually:\npkill -9 -f agent.py\npkill -9 screencapture\npkill -9 osascript\n\nThen restart:\ncd ~/claude_mac_agent && python3 agent.py")
         else:
-            await update.message.reply_text("✅ Kill command sent!\n\n⚠️ To restart Mac agent:\ncd ~/claude_mac_agent && python3 agent.py")
+            await update.message.reply_text("Kill command sent!\n\nTo restart Mac agent:\ncd ~/claude_mac_agent && python3 agent.py")
     except Exception as e:
         logger.error(f"Restart error: {e}")
-        await update.message.reply_text("⚠️ Could not verify process status\n\nManually restart:\npkill -9 -f agent.py && cd ~/claude_mac_agent && python3 agent.py")
+        await update.message.reply_text("Could not verify process status\n\nManually restart:\npkill -9 -f agent.py && cd ~/claude_mac_agent && python3 agent.py")
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -211,7 +190,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     screenshot_bytes = base64.b64decode(screenshot["data"])
                     caption_parts = [f"Screenshot {idx+1}"]
                     if screenshot.get("title"):
-                        caption_parts.append(f"📌 {screenshot['title']}")
+                        caption_parts.append(f"{screenshot['title']}")
                     if screenshot.get("mode"):
                         caption_parts.append(f"({screenshot['mode']} mode)")
                     if screenshot.get("app"):
@@ -219,7 +198,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     if screenshot.get("description"):
                         caption_parts.append(f"\n{screenshot['description']}")
                     if screenshot.get("url"):
-                        caption_parts.append(f"\n🔗 {screenshot['url']}")
+                        caption_parts.append(f"\n{screenshot['url']}")
                     caption = " ".join(caption_parts)
                     await update.message.reply_photo(photo=io.BytesIO(screenshot_bytes), caption=caption)
                     logger.info(f"Screenshot {idx+1} sent with metadata: {screenshot.get('url', 'no url')}")
