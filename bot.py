@@ -23,20 +23,22 @@ user_conversations = {}
 screenshot_metadata = {}
 
 MAC_TOOLS = [
+    {"name": "capture_images", "description": """PREFERRED: Download images from the current webpage in Chrome. Returns clean image files (not screenshots) with their source links. Use count to specify how many images to capture (default 5).""",
+     "input_schema": {"type": "object", "properties": {"count": {"type": "integer", "description": "Number of images to capture (default 5)"}, "min_width": {"type": "integer"}, "min_height": {"type": "integer"}}, "required": []}},
     {"name": "execute_mac_command", "description": "Execute a shell command on the Mac", "input_schema": {"type": "object", "properties": {"command": {"type": "string", "description": "Shell command"}}, "required": ["command"]}},
     {"name": "execute_applescript", "description": "Execute AppleScript to control Mac applications", "input_schema": {"type": "object", "properties": {"script": {"type": "string", "description": "AppleScript code"}}, "required": ["script"]}},
     {"name": "read_mac_file", "description": "Read file contents", "input_schema": {"type": "object", "properties": {"filepath": {"type": "string"}}, "required": ["filepath"]}},
-    {"name": "take_screenshot", "description": """Take a screenshot. Modes: 'full', 'window' (requires app_name), 'region' (requires region with x,y,width,height as SCREEN coordinates).""",
-     "input_schema": {"type": "object", "properties": {"mode": {"type": "string", "enum": ["full", "window", "region"]}, "app_name": {"type": "string"}, "region": {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}, "width": {"type": "integer"}, "height": {"type": "integer"}}}}, "required": []}},
+    {"name": "take_screenshot", "description": """Take a screenshot of the screen (NOT for capturing webpage images - use capture_images instead). Modes: 'full', 'window' (requires app_name).""",
+     "input_schema": {"type": "object", "properties": {"mode": {"type": "string", "enum": ["full", "window"]}, "app_name": {"type": "string"}}, "required": []}},
     {"name": "list_windows", "description": "List all open windows", "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "get_window_bounds", "description": "Get window position and size", "input_schema": {"type": "object", "properties": {"app_name": {"type": "string"}}, "required": ["app_name"]}},
     {"name": "scroll_page", "description": "Scroll page up or down", "input_schema": {"type": "object", "properties": {"app_name": {"type": "string"}, "direction": {"type": "string", "enum": ["down", "up"]}, "amount": {"type": "integer"}}, "required": []}},
     {"name": "execute_javascript_in_chrome", "description": "Execute JavaScript in Chrome's active tab", "input_schema": {"type": "object", "properties": {"js_code": {"type": "string"}}, "required": ["js_code"]}},
     {"name": "wait", "description": "Wait for seconds (1-30)", "input_schema": {"type": "object", "properties": {"seconds": {"type": "integer"}}, "required": ["seconds"]}},
     {"name": "check_mac_status", "description": "Check if Mac is online", "input_schema": {"type": "object", "properties": {}, "required": []}},
-    {"name": "list_page_images", "description": """Get metadata about all images on current page. Returns index, position, size, alt text for each image. Use download_selected_images with the indices you want.""",
+    {"name": "list_page_images", "description": """Get metadata about all images on current page. Returns index and info for each image. Use download_selected_images with the indices you want.""",
      "input_schema": {"type": "object", "properties": {"min_width": {"type": "integer"}, "min_height": {"type": "integer"}}, "required": []}},
-    {"name": "download_selected_images", "description": """Download specific images by index. Pass the indices of images you want to download (from list_page_images). Returns clean image files with their Pinterest/source links.""",
+    {"name": "download_selected_images", "description": """Download specific images by index. Pass the indices of images you want to download (from list_page_images). Returns clean image files with their source links.""",
      "input_schema": {"type": "object", "properties": {"indices": {"type": "array", "items": {"type": "integer"}, "description": "List of image indices to download"}}, "required": ["indices"]}}
 ]
 
@@ -89,13 +91,13 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
         tools = MAC_TOOLS if (MAC_IP and MAC_PORT and MAC_SECRET) else None
-        system_prompt = """You control a Mac. For capturing images from websites:
+        system_prompt = """You control a Mac with Chrome browser. For capturing images from websites:
 
-1. Call list_page_images to get all images with their indices
-2. Call download_selected_images with the indices you want
+USE capture_images - it's the simplest and most reliable option. It downloads actual image files (not screenshots) with their source links in one step.
 
-This downloads the actual image files (not screenshots) with their source links.
-DO NOT use take_screenshot for capturing product/pin images - that creates overlapping crops."""
+Example: capture_images with count=5 will get 5 images from the current page.
+
+AVOID take_screenshot for webpage images - it creates overlapping crops. Only use take_screenshot for actual screen captures."""
         response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=4096, system=system_prompt, messages=user_conversations[user_id], tools=tools if tools else anthropic.NOT_GIVEN)
         while response.stop_reason == "tool_use":
             assistant_content = response.content
@@ -148,6 +150,19 @@ DO NOT use take_screenshot for capturing product/pin images - that creates overl
                     elif tool_name == "check_mac_status":
                         result = call_mac("ping")
                         tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "capture_images":
+                        result = call_mac("capture_images", count=tool_input.get("count", 5), min_width=tool_input.get("min_width", 150), min_height=tool_input.get("min_height", 150))
+                        if result.get("success") and result.get("screenshots"):
+                            for img in result["screenshots"]:
+                                screenshots_to_send.append({
+                                    "data": img["image_data"],
+                                    "url": img.get("url", ""),
+                                    "alt": img.get("alt", ""),
+                                    "mode": "download"
+                                })
+                            tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps({"success": True, "count": result["count"], "page_url": result.get("page_url", "")})})
+                        else:
+                            tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
                     elif tool_name == "list_page_images":
                         result = call_mac("list_page_images", min_width=tool_input.get("min_width", 150), min_height=tool_input.get("min_height", 150))
                         tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
@@ -211,18 +226,4 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(assistant_message)
     except Exception as e:
         logger.error(f"Error: {e}")
-        await update.message.reply_text(f"Error: {str(e)}")
-
-def main():
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("clear", clear_history))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    logger.info("Starting bot...")
-    logger.info(f"Mac: {MAC_IP}:{MAC_PORT}")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == "__main__":
-    main()
+        await update.message.reply_text(f"Error: {

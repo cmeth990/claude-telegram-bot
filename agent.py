@@ -155,47 +155,27 @@ end tell
 def capture_webpage_images(count=5, min_width=150, min_height=150):
     import urllib.request
 
+    # Simplified and faster JS
     js_code = f'''
     (function() {{
-        const results = [];
-        const images = document.querySelectorAll('img');
-
-        for (const img of images) {{
-            if (results.length >= {count}) break;
+        var r = [];
+        var imgs = document.querySelectorAll('img');
+        for (var i = 0; i < imgs.length && r.length < {count}; i++) {{
+            var img = imgs[i];
             if (img.naturalWidth < {min_width} || img.naturalHeight < {min_height}) continue;
-
-            const rect = img.getBoundingClientRect();
-            if (rect.width < 100 || rect.height < 100) continue;
-            if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
-
-            let imgSrc = img.src;
+            var rect = img.getBoundingClientRect();
+            if (rect.width < 80 || rect.height < 80) continue;
+            var src = img.src;
             if (img.srcset) {{
-                const srcsetParts = img.srcset.split(',').map(s => s.trim());
-                const lastSrc = srcsetParts[srcsetParts.length - 1];
-                if (lastSrc) imgSrc = lastSrc.split(' ')[0];
+                var parts = img.srcset.split(',');
+                var last = parts[parts.length - 1].trim().split(' ')[0];
+                if (last) src = last;
             }}
-
-            if (!imgSrc || imgSrc.startsWith('data:')) continue;
-
-            let link = img.closest('a');
-            if (!link) {{
-                let parent = img.parentElement;
-                for (let i = 0; i < 5 && parent; i++) {{
-                    if (parent.tagName === 'A') {{ link = parent; break; }}
-                    parent = parent.parentElement;
-                }}
-            }}
-
-            results.push({{
-                src: imgSrc,
-                url: link ? link.href : '',
-                alt: img.alt || '',
-                width: img.naturalWidth,
-                height: img.naturalHeight
-            }});
+            if (!src || src.indexOf('data:') === 0) continue;
+            var link = img.closest('a');
+            r.push({{s: src, u: link ? link.href : '', a: img.alt || '', w: img.naturalWidth, h: img.naturalHeight}});
         }}
-
-        return JSON.stringify(results);
+        return JSON.stringify(r);
     }})();
     '''
 
@@ -212,7 +192,7 @@ end tell
 '''
 
     log("Finding images on page...")
-    result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=15)
+    result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=30)
 
     if result.returncode != 0:
         return {'success': False, 'error': f'JS failed: {result.stderr}'}
@@ -222,7 +202,18 @@ end tell
         page_title = parts[0] if len(parts) > 0 else ''
         page_url = parts[1] if len(parts) > 1 else ''
         images_json = parts[2] if len(parts) > 2 else '[]'
-        images_data = json.loads(images_json)
+        raw_data = json.loads(images_json)
+        # Convert short keys back to full names
+        images_data = [
+            {
+                'src': img.get('s', ''),
+                'url': img.get('u', ''),
+                'alt': img.get('a', ''),
+                'width': img.get('w', 0),
+                'height': img.get('h', 0)
+            }
+            for img in raw_data
+        ]
     except Exception as e:
         return {'success': False, 'error': f'Could not parse: {e}'}
 
@@ -273,50 +264,28 @@ _cached_images = []
 def list_page_images(min_width=150, min_height=150):
     global _cached_images
 
+    # Simplified JS - faster execution
     js_code = f'''
     (function() {{
-        const results = [];
-        const images = document.querySelectorAll('img');
-        let idx = 0;
-
-        for (const img of images) {{
+        var r = [];
+        var imgs = document.querySelectorAll('img');
+        var idx = 0;
+        for (var i = 0; i < imgs.length && idx < 30; i++) {{
+            var img = imgs[i];
             if (img.naturalWidth < {min_width} || img.naturalHeight < {min_height}) continue;
-
-            const rect = img.getBoundingClientRect();
-            if (rect.width < 100 || rect.height < 100) continue;
-            if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
-
-            let imgSrc = img.src;
+            var rect = img.getBoundingClientRect();
+            if (rect.width < 80 || rect.height < 80) continue;
+            var src = img.src;
             if (img.srcset) {{
-                const srcsetParts = img.srcset.split(',').map(s => s.trim());
-                const lastSrc = srcsetParts[srcsetParts.length - 1];
-                if (lastSrc) imgSrc = lastSrc.split(' ')[0];
+                var parts = img.srcset.split(',');
+                var last = parts[parts.length - 1].trim().split(' ')[0];
+                if (last) src = last;
             }}
-
-            if (!imgSrc || imgSrc.startsWith('data:')) continue;
-
-            let link = img.closest('a');
-            if (!link) {{
-                let parent = img.parentElement;
-                for (let i = 0; i < 5 && parent; i++) {{
-                    if (parent.tagName === 'A') {{ link = parent; break; }}
-                    parent = parent.parentElement;
-                }}
-            }}
-
-            results.push({{
-                index: idx++,
-                src: imgSrc,
-                url: link ? link.href : '',
-                alt: img.alt || '',
-                width: img.naturalWidth,
-                height: img.naturalHeight,
-                top: Math.round(rect.top),
-                left: Math.round(rect.left)
-            }});
+            if (!src || src.indexOf('data:') === 0) continue;
+            var link = img.closest('a');
+            r.push({{i: idx++, s: src, u: link ? link.href : '', a: img.alt || '', w: img.naturalWidth, h: img.naturalHeight}});
         }}
-
-        return JSON.stringify(results);
+        return JSON.stringify(r);
     }})();
     '''
 
@@ -333,7 +302,7 @@ end tell
 '''
 
     log("Listing images on page...")
-    result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=15)
+    result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=30)
 
     if result.returncode != 0:
         return {'success': False, 'error': f'JS failed: {result.stderr}'}
@@ -344,6 +313,18 @@ end tell
         page_url = parts[1] if len(parts) > 1 else ''
         images_json = parts[2] if len(parts) > 2 else '[]'
         images_data = json.loads(images_json)
+        # Convert short keys back to full names
+        images_data = [
+            {
+                'index': img.get('i', 0),
+                'src': img.get('s', ''),
+                'url': img.get('u', ''),
+                'alt': img.get('a', ''),
+                'width': img.get('w', 0),
+                'height': img.get('h', 0)
+            }
+            for img in images_data
+        ]
     except Exception as e:
         return {'success': False, 'error': f'Could not parse: {e}'}
 
@@ -359,10 +340,9 @@ end tell
         'images': [
             {
                 'index': img['index'],
-                'alt': img['alt'][:100] if img['alt'] else f"Image at ({img['left']}, {img['top']})",
+                'alt': img['alt'][:100] if img['alt'] else f"Image {img['index']}",
                 'width': img['width'],
                 'height': img['height'],
-                'position': f"({img['left']}, {img['top']})",
                 'has_link': bool(img['url'])
             }
             for img in images_data
@@ -458,7 +438,7 @@ server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(('0.0.0.0', PORT))
 server.listen(5)
 print('=' * 50)
-print('Mac Agent v4 - Visual Curation')
+print('Mac Agent v5 - Optimized Image Capture')
 print('=' * 50)
 print(f'Port: {PORT}')
 print(f'Screenshots: {SCREENSHOT_DIR}')
