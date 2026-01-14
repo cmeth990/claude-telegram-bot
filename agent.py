@@ -350,6 +350,551 @@ end tell
     }
 
 
+# ============================================================================
+# UBER AUTOMATION - Hybrid Visual + DOM approach
+# ============================================================================
+
+def uber_open_app(pickup_lat=None, pickup_lon=None):
+    """
+    Step 1: Open Uber mobile web app in Chrome.
+    Optionally pre-set pickup coordinates via URL parameter.
+    Returns success and current page state for visual analysis.
+    """
+    import time
+    import urllib.parse
+
+    log(f"Opening Uber app...")
+
+    # Build URL - with or without pickup coordinates
+    if pickup_lat and pickup_lon:
+        uber_url = "https://m.uber.com/go/product-selection"
+    else:
+        uber_url = "https://m.uber.com"
+
+    # Open Chrome and navigate
+    open_script = '''
+tell application "Google Chrome"
+    activate
+    if (count of windows) = 0 then
+        make new window
+    end if
+    set URL of active tab of front window to "''' + uber_url + '''"
+end tell
+'''
+    result = subprocess.run(['osascript', '-e', open_script], capture_output=True, text=True, timeout=10)
+    if result.returncode != 0:
+        return {'success': False, 'error': 'Failed to open Chrome: ' + result.stderr}
+
+    log("Opened Uber, waiting for page load...")
+    time.sleep(3)
+
+    return {
+        'success': True,
+        'message': 'Uber app opened in Chrome',
+        'url': uber_url,
+        'next_step': 'Take a screenshot to see current state (login required? pickup set?)'
+    }
+
+
+def uber_get_page_state():
+    """
+    Analyze current Uber page state by extracting visible text and elements.
+    Returns structured info about what's on screen.
+    """
+    import time
+
+    js_code = '''
+    (function() {
+        var state = {
+            url: window.location.href,
+            title: document.title,
+            isLoggedIn: false,
+            hasPickup: false,
+            hasDestination: false,
+            rideOptions: [],
+            visibleButtons: [],
+            visibleInputs: [],
+            pageText: ''
+        };
+
+        // Check for login indicators
+        var loginBtn = document.querySelector('[data-testid="login-button"]') ||
+                      document.querySelector('a[href*="login"]') ||
+                      Array.from(document.querySelectorAll('button')).find(b =>
+                          b.textContent.toLowerCase().includes('sign in') ||
+                          b.textContent.toLowerCase().includes('log in'));
+        state.isLoggedIn = !loginBtn;
+
+        // Check for pickup/destination
+        var inputs = document.querySelectorAll('input');
+        inputs.forEach(function(inp) {
+            var placeholder = (inp.placeholder || '').toLowerCase();
+            var value = inp.value || '';
+            state.visibleInputs.push({
+                placeholder: inp.placeholder,
+                value: value,
+                id: inp.id,
+                name: inp.name
+            });
+            if (placeholder.includes('pickup') || placeholder.includes('from')) {
+                state.hasPickup = value.length > 0;
+            }
+            if (placeholder.includes('destination') || placeholder.includes('where') || placeholder.includes('to')) {
+                state.hasDestination = value.length > 0;
+            }
+        });
+
+        // Find clickable buttons
+        var buttons = document.querySelectorAll('button, [role="button"], a[href]');
+        buttons.forEach(function(btn) {
+            var text = (btn.textContent || '').trim().substring(0, 50);
+            if (text && !text.includes('\\n')) {
+                state.visibleButtons.push(text);
+            }
+        });
+
+        // Extract ride options if visible
+        var rideCards = document.querySelectorAll('[data-testid*="product"], [class*="product"]');
+        rideCards.forEach(function(card) {
+            var name = card.querySelector('[class*="name"], [class*="title"]');
+            var price = card.querySelector('[class*="price"], [class*="fare"]');
+            if (name) {
+                state.rideOptions.push({
+                    name: (name.textContent || '').trim(),
+                    price: price ? (price.textContent || '').trim() : ''
+                });
+            }
+        });
+
+        // Get visible page text for context
+        state.pageText = document.body.innerText.substring(0, 2000);
+
+        return JSON.stringify(state);
+    })();
+    '''
+
+    escaped_js = js_code.replace('\\', '\\\\').replace('"', '\\"').replace('\n', ' ')
+    script = f'''
+tell application "Google Chrome"
+    tell active tab of front window
+        execute javascript "{escaped_js}"
+    end tell
+end tell
+'''
+
+    result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=15)
+
+    if result.returncode != 0:
+        return {'success': False, 'error': f'Failed to analyze page: {result.stderr}'}
+
+    try:
+        state = json.loads(result.stdout.strip())
+        return {'success': True, 'state': state}
+    except:
+        return {'success': True, 'state': {'raw': result.stdout.strip()}}
+
+
+def uber_click_element(selector=None, text_contains=None, element_type='button'):
+    """
+    Click an element on the Uber page.
+    Can target by CSS selector or by text content.
+    """
+    import time
+
+    if selector:
+        js_code = f'''
+        (function() {{
+            var el = document.querySelector('{selector}');
+            if (el) {{
+                el.click();
+                return JSON.stringify({{success: true, clicked: '{selector}'}});
+            }}
+            return JSON.stringify({{success: false, error: 'Element not found: {selector}'}});
+        }})();
+        '''
+    elif text_contains:
+        safe_text = text_contains.replace("'", "\\'")
+        js_code = f'''
+        (function() {{
+            var elements = document.querySelectorAll('{element_type}, [role="button"], a');
+            for (var i = 0; i < elements.length; i++) {{
+                var el = elements[i];
+                if (el.textContent.toLowerCase().includes('{safe_text.lower()}')) {{
+                    el.click();
+                    return JSON.stringify({{success: true, clicked: el.textContent.trim().substring(0, 50)}});
+                }}
+            }}
+            return JSON.stringify({{success: false, error: 'No element containing "{safe_text}" found'}});
+        }})();
+        '''
+    else:
+        return {'success': False, 'error': 'Must provide selector or text_contains'}
+
+    escaped_js = js_code.replace('\\', '\\\\').replace('"', '\\"').replace('\n', ' ')
+    script = f'''
+tell application "Google Chrome"
+    tell active tab of front window
+        execute javascript "{escaped_js}"
+    end tell
+end tell
+'''
+
+    result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=10)
+
+    if result.returncode != 0:
+        return {'success': False, 'error': result.stderr}
+
+    try:
+        return json.loads(result.stdout.strip())
+    except:
+        return {'success': True, 'result': result.stdout.strip()}
+
+
+def uber_type_text(text, selector=None, clear_first=True):
+    """
+    Type text into an input field.
+    Can target by selector or will find the focused/active input.
+    """
+    import time
+
+    safe_text = text.replace('\\', '\\\\').replace("'", "\\'").replace('"', '\\"')
+
+    if selector:
+        js_code = f'''
+        (function() {{
+            var el = document.querySelector('{selector}');
+            if (!el) return JSON.stringify({{success: false, error: 'Input not found'}});
+            el.focus();
+            {'el.value = "";' if clear_first else ''}
+            el.value = '{safe_text}';
+            el.dispatchEvent(new Event('input', {{bubbles: true}}));
+            el.dispatchEvent(new Event('change', {{bubbles: true}}));
+            return JSON.stringify({{success: true, typed: '{safe_text}'}});
+        }})();
+        '''
+    else:
+        js_code = f'''
+        (function() {{
+            var el = document.activeElement;
+            if (!el || (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA')) {{
+                // Try to find a visible input
+                var inputs = document.querySelectorAll('input:not([type="hidden"])');
+                for (var i = 0; i < inputs.length; i++) {{
+                    var rect = inputs[i].getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0) {{
+                        el = inputs[i];
+                        break;
+                    }}
+                }}
+            }}
+            if (!el) return JSON.stringify({{success: false, error: 'No input found'}});
+            el.focus();
+            {'el.value = "";' if clear_first else ''}
+            el.value = '{safe_text}';
+            el.dispatchEvent(new Event('input', {{bubbles: true}}));
+            el.dispatchEvent(new Event('change', {{bubbles: true}}));
+            return JSON.stringify({{success: true, typed: '{safe_text}', element: el.tagName}});
+        }})();
+        '''
+
+    escaped_js = js_code.replace('\\', '\\\\').replace('"', '\\"').replace('\n', ' ')
+    script = f'''
+tell application "Google Chrome"
+    tell active tab of front window
+        execute javascript "{escaped_js}"
+    end tell
+end tell
+'''
+
+    result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=10)
+
+    if result.returncode != 0:
+        return {'success': False, 'error': result.stderr}
+
+    try:
+        return json.loads(result.stdout.strip())
+    except:
+        return {'success': True, 'result': result.stdout.strip()}
+
+
+def uber_set_location(location_type, lat, lon, address=''):
+    """
+    Set pickup or destination location using coordinates.
+    location_type: 'pickup' or 'destination'
+    """
+    import time
+    import urllib.parse
+
+    log(f"Setting {location_type}: {lat}, {lon} ({address})")
+
+    # For pickup, we can use URL parameters
+    if location_type == 'pickup':
+        # Navigate to URL with pickup coordinates
+        pickup_json = json.dumps({"latitude": lat, "longitude": lon})
+        uber_url = "https://m.uber.com/go/product-selection?pickup=" + urllib.parse.quote(pickup_json)
+
+        script = '''
+tell application "Google Chrome"
+    set URL of active tab of front window to "''' + uber_url + '''"
+end tell
+'''
+        result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=10)
+        time.sleep(2)
+
+        return {
+            'success': result.returncode == 0,
+            'message': f'Navigated to Uber with pickup at {address or f"{lat}, {lon}"}',
+            'url': uber_url
+        }
+
+    # For destination, we need to interact with the page
+    else:
+        # First try to click the destination field
+        click_result = uber_click_element(text_contains='where to')
+        if not click_result.get('success'):
+            click_result = uber_click_element(text_contains='destination')
+
+        time.sleep(1)
+
+        # Type the address
+        if address:
+            type_result = uber_type_text(address)
+            time.sleep(2)  # Wait for autocomplete
+
+            return {
+                'success': True,
+                'message': f'Entered destination: {address}',
+                'click_result': click_result,
+                'type_result': type_result,
+                'next_step': 'Take a screenshot to see autocomplete results, then click the correct one'
+            }
+        else:
+            return {
+                'success': False,
+                'error': 'Destination address required'
+            }
+
+
+def uber_select_autocomplete(index=0):
+    """
+    Select an autocomplete result by index (0 = first result).
+    """
+    import time
+
+    js_code = f'''
+    (function() {{
+        // Look for autocomplete dropdown items
+        var items = document.querySelectorAll('[data-testid*="autocomplete"] li, [class*="autocomplete"] li, [role="listbox"] [role="option"], [class*="suggestion"], [class*="result"]');
+        if (items.length === 0) {{
+            // Try more generic selectors
+            items = document.querySelectorAll('ul li, [role="option"]');
+        }}
+
+        var validItems = [];
+        items.forEach(function(item) {{
+            var rect = item.getBoundingClientRect();
+            if (rect.width > 50 && rect.height > 20) {{
+                validItems.push(item);
+            }}
+        }});
+
+        if (validItems.length > {index}) {{
+            validItems[{index}].click();
+            return JSON.stringify({{success: true, selected: validItems[{index}].textContent.trim().substring(0, 100)}});
+        }}
+
+        return JSON.stringify({{success: false, error: 'No autocomplete items found', found: validItems.length}});
+    }})();
+    '''
+
+    escaped_js = js_code.replace('\\', '\\\\').replace('"', '\\"').replace('\n', ' ')
+    script = f'''
+tell application "Google Chrome"
+    tell active tab of front window
+        execute javascript "{escaped_js}"
+    end tell
+end tell
+'''
+
+    result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=10)
+
+    if result.returncode != 0:
+        return {'success': False, 'error': result.stderr}
+
+    try:
+        return json.loads(result.stdout.strip())
+    except:
+        return {'success': True, 'result': result.stdout.strip()}
+
+
+def uber_select_ride_type(ride_type='UberX'):
+    """
+    Select a ride type from available options.
+    """
+    import time
+
+    log(f"Selecting ride type: {ride_type}")
+
+    # Click on the ride type option
+    result = uber_click_element(text_contains=ride_type.lower())
+
+    if not result.get('success'):
+        # Try alternate names
+        alternates = {
+            'uberx': ['uber x', 'economy'],
+            'comfort': ['uber comfort'],
+            'uberxl': ['uber xl', 'xl'],
+            'black': ['uber black', 'premium']
+        }
+        for alt in alternates.get(ride_type.lower(), []):
+            result = uber_click_element(text_contains=alt)
+            if result.get('success'):
+                break
+
+    return result
+
+
+def uber_confirm_ride():
+    """
+    Click the confirm/request ride button.
+    """
+    log("Confirming ride request...")
+
+    # Try various confirm button patterns
+    patterns = ['confirm', 'request', 'book', 'continue']
+
+    for pattern in patterns:
+        result = uber_click_element(text_contains=pattern)
+        if result.get('success'):
+            return {
+                'success': True,
+                'message': f'Clicked "{pattern}" button',
+                'result': result
+            }
+
+    return {
+        'success': False,
+        'error': 'Could not find confirm button',
+        'next_step': 'Take a screenshot to see current state'
+    }
+
+
+def uber_keyboard_action(action):
+    """
+    Perform keyboard actions: 'enter', 'tab', 'escape', 'down', 'up'
+    """
+    key_codes = {
+        'enter': 36,
+        'return': 36,
+        'tab': 48,
+        'escape': 53,
+        'down': 125,
+        'up': 126,
+        'left': 123,
+        'right': 124
+    }
+
+    code = key_codes.get(action.lower())
+    if not code:
+        return {'success': False, 'error': f'Unknown key: {action}'}
+
+    script = f'''
+tell application "System Events"
+    key code {code}
+end tell
+'''
+
+    result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=5)
+
+    return {
+        'success': result.returncode == 0,
+        'action': action,
+        'error': result.stderr if result.returncode != 0 else None
+    }
+
+
+# Fast, fully automated Uber ordering using direct keyboard simulation
+def order_uber(pickup_lat, pickup_lon, pickup_address, destination, ride_type='UberX'):
+    """
+    Fully automated Uber ordering - opens Chrome, sets pickup, enters destination,
+    and leaves user at ride selection screen. Uses direct keyboard simulation for speed.
+    """
+    import time
+    import urllib.parse
+
+    log(f"Starting Uber order: from ({pickup_lat}, {pickup_lon}) to {destination}")
+
+    # Step 1: Build URL with pickup coordinates embedded
+    pickup_data = json.dumps({"latitude": pickup_lat, "longitude": pickup_lon})
+    uber_url = "https://m.uber.com/go/home?pickup=" + urllib.parse.quote(pickup_data)
+
+    # Open Chrome and navigate directly to Uber with pickup set
+    script = '''
+tell application "Google Chrome"
+    activate
+    if (count of windows) = 0 then
+        make new window
+    end if
+    set URL of active tab of front window to "''' + uber_url + '''"
+end tell
+'''
+    result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=10)
+    if result.returncode != 0:
+        return {'success': False, 'error': 'Failed to open Chrome'}
+
+    log("Opened Uber with pickup location, waiting for load...")
+    time.sleep(4)
+
+    # Step 2: Click on dropoff field using AppleScript mouse click at known position
+    # The dropoff field is in the left panel, second input field
+    click_dropoff = '''
+tell application "Google Chrome"
+    activate
+end tell
+delay 0.3
+tell application "System Events"
+    -- Click on the "Dropoff location" field (approximate position in left panel)
+    click at {200, 200}
+end tell
+'''
+    subprocess.run(['osascript', '-e', click_dropoff], capture_output=True, text=True, timeout=5)
+    time.sleep(1.5)
+
+    # Step 3: Type the destination using System Events (fast keyboard input)
+    safe_dest = destination.replace('"', '\\"').replace("'", "'")
+    type_dest = f'''
+tell application "System Events"
+    keystroke "{safe_dest}"
+end tell
+'''
+    subprocess.run(['osascript', '-e', type_dest], capture_output=True, text=True, timeout=5)
+    log(f"Typed destination: {destination}")
+    time.sleep(2)  # Wait for autocomplete
+
+    # Step 4: Press down arrow and enter to select first autocomplete result
+    select_result = '''
+tell application "System Events"
+    key code 125  -- down arrow
+    delay 0.3
+    key code 36   -- enter/return
+end tell
+'''
+    subprocess.run(['osascript', '-e', select_result], capture_output=True, text=True, timeout=5)
+    log("Selected first autocomplete result")
+    time.sleep(2)
+
+    pickup_display = pickup_address if pickup_address else f"{pickup_lat}, {pickup_lon}"
+
+    return {
+        'success': True,
+        'message': f'Uber ride setup complete! Pickup: {pickup_display}, Destination: {destination}',
+        'pickup': pickup_display,
+        'destination': destination,
+        'status': 'Ready to select ride type and confirm. The user should now see ride options in Chrome.',
+        'user_action_required': 'Select your preferred ride type (UberX, Comfort, etc.) and tap "Confirm" to request the ride.'
+    }
+
+
 def download_selected_images(indices):
     global _cached_images
     import urllib.request
@@ -431,6 +976,49 @@ def handle_request(data):
         return list_page_images(min_width=data.get('min_width', 150), min_height=data.get('min_height', 150))
     elif action == 'download_selected_images':
         return download_selected_images(indices=data.get('indices', []))
+    elif action == 'order_uber':
+        return order_uber(
+            pickup_lat=data.get('pickup_lat'),
+            pickup_lon=data.get('pickup_lon'),
+            pickup_address=data.get('pickup_address', ''),
+            destination=data.get('destination', ''),
+            ride_type=data.get('ride_type', 'UberX')
+        )
+    # New granular Uber tools
+    elif action == 'uber_open':
+        return uber_open_app(
+            pickup_lat=data.get('pickup_lat'),
+            pickup_lon=data.get('pickup_lon')
+        )
+    elif action == 'uber_get_state':
+        return uber_get_page_state()
+    elif action == 'uber_click':
+        return uber_click_element(
+            selector=data.get('selector'),
+            text_contains=data.get('text_contains'),
+            element_type=data.get('element_type', 'button')
+        )
+    elif action == 'uber_type':
+        return uber_type_text(
+            text=data.get('text', ''),
+            selector=data.get('selector'),
+            clear_first=data.get('clear_first', True)
+        )
+    elif action == 'uber_set_location':
+        return uber_set_location(
+            location_type=data.get('location_type', 'destination'),
+            lat=data.get('lat'),
+            lon=data.get('lon'),
+            address=data.get('address', '')
+        )
+    elif action == 'uber_select_autocomplete':
+        return uber_select_autocomplete(index=data.get('index', 0))
+    elif action == 'uber_select_ride':
+        return uber_select_ride_type(ride_type=data.get('ride_type', 'UberX'))
+    elif action == 'uber_confirm':
+        return uber_confirm_ride()
+    elif action == 'uber_keyboard':
+        return uber_keyboard_action(action=data.get('key', 'enter'))
     return {'success': False, 'error': 'Unknown action'}
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -438,7 +1026,7 @@ server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(('0.0.0.0', PORT))
 server.listen(5)
 print('=' * 50)
-print('Mac Agent v5 - Optimized Image Capture')
+print('Mac Agent v6 - Uber Automation + Visual Hybrid')
 print('=' * 50)
 print(f'Port: {PORT}')
 print(f'Screenshots: {SCREENSHOT_DIR}')

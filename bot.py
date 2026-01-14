@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import os, logging, json, socket, base64, io
-from telegram import Update
+from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 import anthropic
 from pathlib import Path
@@ -21,6 +21,7 @@ if not TELEGRAM_TOKEN or not CLAUDE_API_KEY:
 claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
 user_conversations = {}
 screenshot_metadata = {}
+user_locations = {}  # Store user GPS locations {user_id: {"lat": x, "lon": y, "address": "..."}}
 
 MAC_TOOLS = [
     {"name": "capture_images", "description": """PREFERRED: Download images from the current webpage in Chrome. Returns clean image files (not screenshots) with their source links. Use count to specify how many images to capture (default 5).""",
@@ -39,7 +40,30 @@ MAC_TOOLS = [
     {"name": "list_page_images", "description": """Get metadata about all images on current page. Returns index and info for each image. Use download_selected_images with the indices you want.""",
      "input_schema": {"type": "object", "properties": {"min_width": {"type": "integer"}, "min_height": {"type": "integer"}}, "required": []}},
     {"name": "download_selected_images", "description": """Download specific images by index. Pass the indices of images you want to download (from list_page_images). Returns clean image files with their source links.""",
-     "input_schema": {"type": "object", "properties": {"indices": {"type": "array", "items": {"type": "integer"}, "description": "List of image indices to download"}}, "required": ["indices"]}}
+     "input_schema": {"type": "object", "properties": {"indices": {"type": "array", "items": {"type": "integer"}, "description": "List of image indices to download"}}, "required": ["indices"]}},
+    {"name": "order_uber", "description": """Order an Uber ride using the user's shared location. Opens Uber website in Chrome, enters pickup/destination, and initiates the ride request. User must have shared their location first via Telegram. The destination can be an address string.""",
+     "input_schema": {"type": "object", "properties": {"destination": {"type": "string", "description": "Destination address or place name"}, "ride_type": {"type": "string", "enum": ["UberX", "Comfort", "UberXL", "Black"], "description": "Type of Uber ride (default: UberX)"}}, "required": ["destination"]}},
+    {"name": "get_user_location", "description": """Get the user's current stored location (latitude, longitude, and address if available). Returns error if user hasn't shared location.""",
+     "input_schema": {"type": "object", "properties": {}, "required": []}},
+    # Granular Uber tools for step-by-step control
+    {"name": "uber_open", "description": """Open the Uber mobile web app in Chrome. Optionally include pickup coordinates.""",
+     "input_schema": {"type": "object", "properties": {"pickup_lat": {"type": "number"}, "pickup_lon": {"type": "number"}}, "required": []}},
+    {"name": "uber_get_state", "description": """Analyze the current Uber page state - returns info about login status, inputs, buttons, and visible ride options.""",
+     "input_schema": {"type": "object", "properties": {}, "required": []}},
+    {"name": "uber_click", "description": """Click an element on the Uber page by CSS selector or text content.""",
+     "input_schema": {"type": "object", "properties": {"selector": {"type": "string", "description": "CSS selector"}, "text_contains": {"type": "string", "description": "Click element containing this text"}, "element_type": {"type": "string", "default": "button"}}, "required": []}},
+    {"name": "uber_type", "description": """Type text into an input field on the Uber page.""",
+     "input_schema": {"type": "object", "properties": {"text": {"type": "string", "description": "Text to type"}, "selector": {"type": "string", "description": "Optional CSS selector for input"}, "clear_first": {"type": "boolean", "default": True}}, "required": ["text"]}},
+    {"name": "uber_set_location", "description": """Set pickup or destination location. For pickup, uses URL parameters. For destination, types the address.""",
+     "input_schema": {"type": "object", "properties": {"location_type": {"type": "string", "enum": ["pickup", "destination"]}, "lat": {"type": "number"}, "lon": {"type": "number"}, "address": {"type": "string"}}, "required": ["location_type"]}},
+    {"name": "uber_select_autocomplete", "description": """Select an autocomplete result by index (0 = first result).""",
+     "input_schema": {"type": "object", "properties": {"index": {"type": "integer", "default": 0}}, "required": []}},
+    {"name": "uber_select_ride", "description": """Select a ride type from available options.""",
+     "input_schema": {"type": "object", "properties": {"ride_type": {"type": "string", "enum": ["UberX", "Comfort", "UberXL", "Black"], "default": "UberX"}}, "required": []}},
+    {"name": "uber_confirm", "description": """Click the confirm/request ride button.""",
+     "input_schema": {"type": "object", "properties": {}, "required": []}},
+    {"name": "uber_keyboard", "description": """Press a keyboard key (enter, tab, escape, down, up).""",
+     "input_schema": {"type": "object", "properties": {"key": {"type": "string", "enum": ["enter", "tab", "escape", "down", "up"]}}, "required": ["key"]}}
 ]
 
 def call_mac(action, **kwargs):
@@ -73,7 +97,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if MAC_IP and MAC_PORT and MAC_SECRET:
         if call_mac("ping").get("success"):
             mac_status = "Online"
-    await update.message.reply_text(f"Welcome!\n\nMac: {mac_status}\n\nCommands: /start /clear /help")
+
+    # Check if user has shared location
+    location_status = "Not shared"
+    if user_id in user_locations:
+        loc = user_locations[user_id]
+        coords = f"{loc['lat']:.4f}, {loc['lon']:.4f}"
+        location_status = f"📍 {loc.get('address', coords)}"
+
+    await update.message.reply_text(
+        f"Welcome!\n\nMac: {mac_status}\nLocation: {location_status}\n\nCommands: /start /clear /help /location"
+    )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
@@ -83,6 +117,47 @@ async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_conversations[user_id] = []
     await update.message.reply_text("Cleared!")
 
+async def request_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Command to request user's location for Uber ordering"""
+    location_button = KeyboardButton(text="📍 Share My Location", request_location=True)
+    reply_markup = ReplyKeyboardMarkup([[location_button]], one_time_keyboard=True, resize_keyboard=True)
+    await update.message.reply_text(
+        "To order an Uber, I need your current location.\n\nTap the button below to share:",
+        reply_markup=reply_markup
+    )
+
+async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle incoming location from user"""
+    user_id = update.effective_user.id
+    location = update.message.location
+
+    # Store the location
+    user_locations[user_id] = {
+        "lat": location.latitude,
+        "lon": location.longitude,
+        "timestamp": update.message.date.isoformat()
+    }
+
+    # Try to reverse geocode using a simple approach (optional - can be enhanced)
+    try:
+        import urllib.request
+        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={location.latitude}&lon={location.longitude}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'TelegramBot/1.0'})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode())
+            address = data.get('display_name', '')[:100]
+            user_locations[user_id]['address'] = address
+    except Exception as e:
+        logger.warning(f"Reverse geocoding failed: {e}")
+        user_locations[user_id]['address'] = f"{location.latitude:.4f}, {location.longitude:.4f}"
+
+    await update.message.reply_text(
+        f"📍 Location saved!\n\n{user_locations[user_id].get('address', 'Unknown')}\n\n"
+        "You can now ask me to order an Uber. Just say something like:\n"
+        "\"Order an Uber to [destination]\"",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in user_conversations:
@@ -91,12 +166,37 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
         tools = MAC_TOOLS if (MAC_IP and MAC_PORT and MAC_SECRET) else None
-        system_prompt = """You control a Mac with Chrome browser. For capturing images from websites:
+        # Build dynamic system prompt with user location if available
+        location_context = ""
+        if user_id in user_locations:
+            loc = user_locations[user_id]
+            loc_coords = f"{loc['lat']}, {loc['lon']}"
+            loc_display = loc.get('address', loc_coords)
+            location_context = f"\n\nUSER LOCATION: The user has shared their location: {loc_display} (lat: {loc['lat']}, lon: {loc['lon']})"
 
+        system_prompt = f"""You control a Mac with Chrome browser.
+
+UBER ORDERING (Hybrid Visual Approach):
+- First check if user has shared location using get_user_location. If not, tell them to use /location command.
+- For simple rides, use order_uber tool - it opens Uber and attempts to set pickup/destination automatically.
+- For more control, use the granular uber_* tools in this sequence:
+  1. uber_open - Opens Uber in Chrome
+  2. take_screenshot - See current page state (login needed? what's visible?)
+  3. uber_set_location with location_type="pickup" - Sets pickup from user's GPS
+  4. uber_set_location with location_type="destination" and address="..." - Types destination
+  5. take_screenshot - See autocomplete results
+  6. uber_select_autocomplete with index=0 - Select first autocomplete result (or use uber_click)
+  7. uber_select_ride - Choose ride type (UberX, Comfort, etc.)
+  8. take_screenshot - Show user the price/ETA before confirming
+  9. uber_confirm - Request the ride (ONLY after user confirms)
+- ALWAYS take a screenshot after major actions to verify state and show user what's happening
+- Use uber_get_state to analyze page elements without a screenshot
+- Use uber_keyboard for pressing Enter, Tab, arrow keys, Escape
+{location_context}
+
+IMAGE CAPTURE:
 USE capture_images - it's the simplest and most reliable option. It downloads actual image files (not screenshots) with their source links in one step.
-
 Example: capture_images with count=5 will get 5 images from the current page.
-
 AVOID take_screenshot for webpage images - it creates overlapping crops. Only use take_screenshot for actual screen captures."""
         response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=4096, system=system_prompt, messages=user_conversations[user_id], tools=tools if tools else anthropic.NOT_GIVEN)
         while response.stop_reason == "tool_use":
@@ -179,6 +279,97 @@ AVOID take_screenshot for webpage images - it creates overlapping crops. Only us
                             tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps({"success": True, "count": result["count"]})})
                         else:
                             tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "get_user_location":
+                        if user_id in user_locations:
+                            result = {"success": True, "location": user_locations[user_id]}
+                        else:
+                            result = {"success": False, "error": "User has not shared their location. Tell them to use /location command."}
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "order_uber":
+                        if user_id not in user_locations:
+                            result = {"success": False, "error": "User has not shared their location. Tell them to use /location command first."}
+                        else:
+                            loc = user_locations[user_id]
+                            destination = tool_input.get("destination", "")
+                            pickup_addr = loc.get("address", f"{loc['lat']}, {loc['lon']}")
+
+                            # Use Claude Code CLI with MCP browser tools for faster, smarter automation
+                            await update.message.reply_text(f"🚗 Ordering Uber to {destination}...")
+
+                            prompt = f"""Order an Uber ride. Use the Chrome browser MCP tools.
+
+PICKUP: {pickup_addr} (coordinates: {loc['lat']}, {loc['lon']})
+DESTINATION: {destination}
+
+Steps:
+1. Navigate to https://m.uber.com in a new Chrome tab
+2. Click on the "Dropoff location" field
+3. Type "{destination}" and select the first autocomplete result
+4. Stop when ride options are visible - DO NOT confirm the ride
+
+Be fast and efficient. Take screenshots only if needed to verify state."""
+
+                            try:
+                                import subprocess
+                                claude_result = subprocess.run(
+                                    ["claude", "-p", prompt, "--output-format", "json", "--allowedTools", "mcp__Claude_in_Chrome__*"],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=90
+                                )
+                                if claude_result.returncode == 0:
+                                    result = {"success": True, "message": f"Uber ride to {destination} is ready! Check Chrome to select ride type and confirm.", "claude_output": claude_result.stdout[:500]}
+                                else:
+                                    result = {"success": False, "error": f"Claude Code error: {claude_result.stderr[:200]}"}
+                            except subprocess.TimeoutExpired:
+                                result = {"success": False, "error": "Uber ordering timed out after 90 seconds"}
+                            except FileNotFoundError:
+                                # Fallback to agent.py if claude CLI not available
+                                result = call_mac(
+                                    "order_uber",
+                                    pickup_lat=loc["lat"],
+                                    pickup_lon=loc["lon"],
+                                    pickup_address=loc.get("address", ""),
+                                    destination=destination,
+                                    ride_type=tool_input.get("ride_type", "UberX")
+                                )
+                            except Exception as e:
+                                result = {"success": False, "error": str(e)}
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    # Granular Uber tools
+                    elif tool_name == "uber_open":
+                        loc = user_locations.get(user_id, {})
+                        result = call_mac("uber_open", pickup_lat=loc.get("lat"), pickup_lon=loc.get("lon"))
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "uber_get_state":
+                        result = call_mac("uber_get_state")
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "uber_click":
+                        result = call_mac("uber_click", selector=tool_input.get("selector"), text_contains=tool_input.get("text_contains"), element_type=tool_input.get("element_type", "button"))
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "uber_type":
+                        result = call_mac("uber_type", text=tool_input.get("text", ""), selector=tool_input.get("selector"), clear_first=tool_input.get("clear_first", True))
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "uber_set_location":
+                        loc = user_locations.get(user_id, {})
+                        result = call_mac("uber_set_location",
+                            location_type=tool_input.get("location_type", "destination"),
+                            lat=tool_input.get("lat") or loc.get("lat"),
+                            lon=tool_input.get("lon") or loc.get("lon"),
+                            address=tool_input.get("address", ""))
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "uber_select_autocomplete":
+                        result = call_mac("uber_select_autocomplete", index=tool_input.get("index", 0))
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "uber_select_ride":
+                        result = call_mac("uber_select_ride", ride_type=tool_input.get("ride_type", "UberX"))
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "uber_confirm":
+                        result = call_mac("uber_confirm")
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "uber_keyboard":
+                        result = call_mac("uber_keyboard", key=tool_input.get("key", "enter"))
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
             for screenshot in screenshots_to_send:
                 try:
                     screenshot_bytes = base64.b64decode(screenshot["data"])
@@ -200,6 +391,15 @@ AVOID take_screenshot for webpage images - it creates overlapping crops. Only us
             user_conversations[user_id] = user_conversations[user_id][-40:]
         if assistant_message:
             await update.message.reply_text(assistant_message)
+    except anthropic.BadRequestError as e:
+        # Handle conversation sync errors by clearing history
+        if "tool_use_id" in str(e) or "tool_result" in str(e):
+            logger.warning(f"Conversation sync error, clearing history: {e}")
+            user_conversations[user_id] = []
+            await update.message.reply_text("Conversation reset due to sync error. Please try again.")
+        else:
+            logger.error(f"API Error: {e}", exc_info=True)
+            await update.message.reply_text(f"Error: {str(e)}")
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
         await update.message.reply_text(f"Error: {str(e)}")
@@ -233,6 +433,8 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("clear", clear_history))
+    application.add_handler(CommandHandler("location", request_location))
+    application.add_handler(MessageHandler(filters.LOCATION, handle_location))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     logger.info("Starting bot...")
