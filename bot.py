@@ -34,11 +34,17 @@ MAC_TOOLS = [
     {"name": "execute_javascript_in_chrome", "description": "Execute JavaScript in Chrome's active tab", "input_schema": {"type": "object", "properties": {"js_code": {"type": "string"}}, "required": ["js_code"]}},
     {"name": "wait", "description": "Wait for seconds (1-30)", "input_schema": {"type": "object", "properties": {"seconds": {"type": "integer"}}, "required": ["seconds"]}},
     {"name": "check_mac_status", "description": "Check if Mac is online", "input_schema": {"type": "object", "properties": {}, "required": []}},
-    {"name": "capture_images", "description": """RECOMMENDED: Capture multiple images from current webpage in ONE call.
-Finds visible images, filters by size, screenshots each, returns with URLs.
-Use this instead of manual JavaScript + screenshots. Just navigate to page first, wait, then call this.
+    {"name": "capture_images", "description": """Capture multiple images from current webpage (auto-selects visible images).
 Returns: {screenshots: [{image_data, url, alt, width, height}...], page_title, page_url, count}""",
-     "input_schema": {"type": "object", "properties": {"count": {"type": "integer", "description": "Max images (default 5)"}, "min_width": {"type": "integer", "description": "Min width px (default 150)"}, "min_height": {"type": "integer", "description": "Min height px (default 150)"}}, "required": []}}
+     "input_schema": {"type": "object", "properties": {"count": {"type": "integer", "description": "Max images (default 5)"}, "min_width": {"type": "integer", "description": "Min width px (default 150)"}, "min_height": {"type": "integer", "description": "Min height px (default 150)"}}, "required": []}},
+    {"name": "list_page_images", "description": """STEP 1 for visual curation: Get metadata about all images on current page.
+Use this AFTER taking a window screenshot so you can see the page.
+Returns index, position, size, alt text for each image. Then use download_selected_images with the indices you want.""",
+     "input_schema": {"type": "object", "properties": {"min_width": {"type": "integer"}, "min_height": {"type": "integer"}}, "required": []}},
+    {"name": "download_selected_images", "description": """STEP 2 for visual curation: Download specific images by index.
+After viewing the page screenshot and calling list_page_images, use this to download only the images that match what the user wants.
+Pass the indices of images you want to download.""",
+     "input_schema": {"type": "object", "properties": {"indices": {"type": "array", "items": {"type": "integer"}, "description": "List of image indices to download (from list_page_images)"}}, "required": ["indices"]}}
 ]
 
 def call_mac(action, **kwargs):
@@ -148,6 +154,18 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                             for i, img in enumerate(result["screenshots"]):
                                 screenshots_to_send.append({"data": img["image_data"], "url": img.get("url", ""), "title": img.get("alt", f"Image {i+1}"), "mode": "capture", "description": f"{img.get('width', '?')}x{img.get('height', '?')}px"})
                             summary = {"success": True, "count": result["count"], "page_title": result.get("page_title", ""), "page_url": result.get("page_url", ""), "images": [{"url": s["url"], "alt": s.get("alt", ""), "width": s["width"], "height": s["height"]} for s in result["screenshots"]]}
+                            tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(summary)})
+                        else:
+                            tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "list_page_images":
+                        result = call_mac("list_page_images", min_width=tool_input.get("min_width", 150), min_height=tool_input.get("min_height", 150))
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "download_selected_images":
+                        result = call_mac("download_selected_images", indices=tool_input.get("indices", []))
+                        if result.get("success") and result.get("screenshots"):
+                            for i, img in enumerate(result["screenshots"]):
+                                screenshots_to_send.append({"data": img["image_data"], "url": img.get("url", ""), "title": img.get("alt", f"Image {img.get('index', i)}"), "mode": "selected", "description": f"{img.get('width', '?')}x{img.get('height', '?')}px"})
+                            summary = {"success": True, "count": result["count"], "downloaded_indices": [s["index"] for s in result["screenshots"]]}
                             tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(summary)})
                         else:
                             tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
