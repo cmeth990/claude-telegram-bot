@@ -47,13 +47,13 @@ MAC_TOOLS = [
      "input_schema": {"type": "object", "properties": {}, "required": []}}
 ]
 
-def call_mac(action, **kwargs):
+def call_mac(action, timeout=30.0, **kwargs):
     if not MAC_IP or not MAC_PORT or not MAC_SECRET:
         return {"success": False, "error": "Mac agent not configured"}
     try:
         request = {"secret": MAC_SECRET, "action": action, **kwargs}
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(30.0)
+        sock.settimeout(timeout)
         sock.connect((MAC_IP, MAC_PORT))
         sock.sendall(json.dumps(request).encode("utf-8"))
         response_chunks = []
@@ -262,8 +262,10 @@ AVOID take_screenshot for webpage images - it creates overlapping crops. Only us
                             destination = tool_input.get("destination", "")
                             await update.message.reply_text(f"🚗 Ordering Uber to {destination}...")
                             # Agent.py now handles Claude CLI integration for fast browser automation
+                            # Use longer timeout (150s) since Claude Code may take up to 120s
                             result = call_mac(
                                 "order_uber",
+                                timeout=150.0,
                                 pickup_lat=loc["lat"],
                                 pickup_lon=loc["lon"],
                                 pickup_address=loc.get("address", ""),
