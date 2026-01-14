@@ -41,29 +41,10 @@ MAC_TOOLS = [
      "input_schema": {"type": "object", "properties": {"min_width": {"type": "integer"}, "min_height": {"type": "integer"}}, "required": []}},
     {"name": "download_selected_images", "description": """Download specific images by index. Pass the indices of images you want to download (from list_page_images). Returns clean image files with their source links.""",
      "input_schema": {"type": "object", "properties": {"indices": {"type": "array", "items": {"type": "integer"}, "description": "List of image indices to download"}}, "required": ["indices"]}},
-    {"name": "order_uber", "description": """Order an Uber ride using the user's shared location. Opens Uber website in Chrome, enters pickup/destination, and initiates the ride request. User must have shared their location first via Telegram. The destination can be an address string.""",
+    {"name": "order_uber", "description": """Order an Uber ride using the user's shared location. ALWAYS use this tool for Uber rides - it uses fast browser automation. User must have shared their location first via Telegram. The destination can be an address string.""",
      "input_schema": {"type": "object", "properties": {"destination": {"type": "string", "description": "Destination address or place name"}, "ride_type": {"type": "string", "enum": ["UberX", "Comfort", "UberXL", "Black"], "description": "Type of Uber ride (default: UberX)"}}, "required": ["destination"]}},
     {"name": "get_user_location", "description": """Get the user's current stored location (latitude, longitude, and address if available). Returns error if user hasn't shared location.""",
-     "input_schema": {"type": "object", "properties": {}, "required": []}},
-    # Granular Uber tools for step-by-step control
-    {"name": "uber_open", "description": """Open the Uber mobile web app in Chrome. Optionally include pickup coordinates.""",
-     "input_schema": {"type": "object", "properties": {"pickup_lat": {"type": "number"}, "pickup_lon": {"type": "number"}}, "required": []}},
-    {"name": "uber_get_state", "description": """Analyze the current Uber page state - returns info about login status, inputs, buttons, and visible ride options.""",
-     "input_schema": {"type": "object", "properties": {}, "required": []}},
-    {"name": "uber_click", "description": """Click an element on the Uber page by CSS selector or text content.""",
-     "input_schema": {"type": "object", "properties": {"selector": {"type": "string", "description": "CSS selector"}, "text_contains": {"type": "string", "description": "Click element containing this text"}, "element_type": {"type": "string", "default": "button"}}, "required": []}},
-    {"name": "uber_type", "description": """Type text into an input field on the Uber page.""",
-     "input_schema": {"type": "object", "properties": {"text": {"type": "string", "description": "Text to type"}, "selector": {"type": "string", "description": "Optional CSS selector for input"}, "clear_first": {"type": "boolean", "default": True}}, "required": ["text"]}},
-    {"name": "uber_set_location", "description": """Set pickup or destination location. For pickup, uses URL parameters. For destination, types the address.""",
-     "input_schema": {"type": "object", "properties": {"location_type": {"type": "string", "enum": ["pickup", "destination"]}, "lat": {"type": "number"}, "lon": {"type": "number"}, "address": {"type": "string"}}, "required": ["location_type"]}},
-    {"name": "uber_select_autocomplete", "description": """Select an autocomplete result by index (0 = first result).""",
-     "input_schema": {"type": "object", "properties": {"index": {"type": "integer", "default": 0}}, "required": []}},
-    {"name": "uber_select_ride", "description": """Select a ride type from available options.""",
-     "input_schema": {"type": "object", "properties": {"ride_type": {"type": "string", "enum": ["UberX", "Comfort", "UberXL", "Black"], "default": "UberX"}}, "required": []}},
-    {"name": "uber_confirm", "description": """Click the confirm/request ride button.""",
-     "input_schema": {"type": "object", "properties": {}, "required": []}},
-    {"name": "uber_keyboard", "description": """Press a keyboard key (enter, tab, escape, down, up).""",
-     "input_schema": {"type": "object", "properties": {"key": {"type": "string", "enum": ["enter", "tab", "escape", "down", "up"]}}, "required": ["key"]}}
+     "input_schema": {"type": "object", "properties": {}, "required": []}}
 ]
 
 def call_mac(action, **kwargs):
@@ -176,22 +157,10 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         system_prompt = f"""You control a Mac with Chrome browser.
 
-UBER ORDERING (Hybrid Visual Approach):
+UBER ORDERING:
 - First check if user has shared location using get_user_location. If not, tell them to use /location command.
-- For simple rides, use order_uber tool - it opens Uber and attempts to set pickup/destination automatically.
-- For more control, use the granular uber_* tools in this sequence:
-  1. uber_open - Opens Uber in Chrome
-  2. take_screenshot - See current page state (login needed? what's visible?)
-  3. uber_set_location with location_type="pickup" - Sets pickup from user's GPS
-  4. uber_set_location with location_type="destination" and address="..." - Types destination
-  5. take_screenshot - See autocomplete results
-  6. uber_select_autocomplete with index=0 - Select first autocomplete result (or use uber_click)
-  7. uber_select_ride - Choose ride type (UberX, Comfort, etc.)
-  8. take_screenshot - Show user the price/ETA before confirming
-  9. uber_confirm - Request the ride (ONLY after user confirms)
-- ALWAYS take a screenshot after major actions to verify state and show user what's happening
-- Use uber_get_state to analyze page elements without a screenshot
-- Use uber_keyboard for pressing Enter, Tab, arrow keys, Escape
+- Use order_uber tool with the destination - it handles everything automatically using fast browser automation.
+- DO NOT try to manually control the browser for Uber - just use order_uber.
 {location_context}
 
 IMAGE CAPTURE:
@@ -291,84 +260,16 @@ AVOID take_screenshot for webpage images - it creates overlapping crops. Only us
                         else:
                             loc = user_locations[user_id]
                             destination = tool_input.get("destination", "")
-                            pickup_addr = loc.get("address", f"{loc['lat']}, {loc['lon']}")
-
-                            # Use Claude Code CLI with MCP browser tools for faster, smarter automation
                             await update.message.reply_text(f"🚗 Ordering Uber to {destination}...")
-
-                            prompt = f"""Order an Uber ride. Use the Chrome browser MCP tools.
-
-PICKUP: {pickup_addr} (coordinates: {loc['lat']}, {loc['lon']})
-DESTINATION: {destination}
-
-Steps:
-1. Navigate to https://m.uber.com in a new Chrome tab
-2. Click on the "Dropoff location" field
-3. Type "{destination}" and select the first autocomplete result
-4. Stop when ride options are visible - DO NOT confirm the ride
-
-Be fast and efficient. Take screenshots only if needed to verify state."""
-
-                            try:
-                                import subprocess
-                                claude_result = subprocess.run(
-                                    ["claude", "-p", prompt, "--output-format", "json", "--allowedTools", "mcp__Claude_in_Chrome__*"],
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=90
-                                )
-                                if claude_result.returncode == 0:
-                                    result = {"success": True, "message": f"Uber ride to {destination} is ready! Check Chrome to select ride type and confirm.", "claude_output": claude_result.stdout[:500]}
-                                else:
-                                    result = {"success": False, "error": f"Claude Code error: {claude_result.stderr[:200]}"}
-                            except subprocess.TimeoutExpired:
-                                result = {"success": False, "error": "Uber ordering timed out after 90 seconds"}
-                            except FileNotFoundError:
-                                # Fallback to agent.py if claude CLI not available
-                                result = call_mac(
-                                    "order_uber",
-                                    pickup_lat=loc["lat"],
-                                    pickup_lon=loc["lon"],
-                                    pickup_address=loc.get("address", ""),
-                                    destination=destination,
-                                    ride_type=tool_input.get("ride_type", "UberX")
-                                )
-                            except Exception as e:
-                                result = {"success": False, "error": str(e)}
-                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
-                    # Granular Uber tools
-                    elif tool_name == "uber_open":
-                        loc = user_locations.get(user_id, {})
-                        result = call_mac("uber_open", pickup_lat=loc.get("lat"), pickup_lon=loc.get("lon"))
-                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
-                    elif tool_name == "uber_get_state":
-                        result = call_mac("uber_get_state")
-                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
-                    elif tool_name == "uber_click":
-                        result = call_mac("uber_click", selector=tool_input.get("selector"), text_contains=tool_input.get("text_contains"), element_type=tool_input.get("element_type", "button"))
-                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
-                    elif tool_name == "uber_type":
-                        result = call_mac("uber_type", text=tool_input.get("text", ""), selector=tool_input.get("selector"), clear_first=tool_input.get("clear_first", True))
-                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
-                    elif tool_name == "uber_set_location":
-                        loc = user_locations.get(user_id, {})
-                        result = call_mac("uber_set_location",
-                            location_type=tool_input.get("location_type", "destination"),
-                            lat=tool_input.get("lat") or loc.get("lat"),
-                            lon=tool_input.get("lon") or loc.get("lon"),
-                            address=tool_input.get("address", ""))
-                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
-                    elif tool_name == "uber_select_autocomplete":
-                        result = call_mac("uber_select_autocomplete", index=tool_input.get("index", 0))
-                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
-                    elif tool_name == "uber_select_ride":
-                        result = call_mac("uber_select_ride", ride_type=tool_input.get("ride_type", "UberX"))
-                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
-                    elif tool_name == "uber_confirm":
-                        result = call_mac("uber_confirm")
-                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
-                    elif tool_name == "uber_keyboard":
-                        result = call_mac("uber_keyboard", key=tool_input.get("key", "enter"))
+                            # Agent.py now handles Claude CLI integration for fast browser automation
+                            result = call_mac(
+                                "order_uber",
+                                pickup_lat=loc["lat"],
+                                pickup_lon=loc["lon"],
+                                pickup_address=loc.get("address", ""),
+                                destination=destination,
+                                ride_type=tool_input.get("ride_type", "UberX")
+                            )
                         tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
             for screenshot in screenshots_to_send:
                 try:

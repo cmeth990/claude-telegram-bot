@@ -813,22 +813,85 @@ end tell
     }
 
 
-# Fast, fully automated Uber ordering using direct keyboard simulation
+# Fast, fully automated Uber ordering using Claude Code CLI with MCP browser tools
 def order_uber(pickup_lat, pickup_lon, pickup_address, destination, ride_type='UberX'):
     """
-    Fully automated Uber ordering - opens Chrome, sets pickup, enters destination,
-    and leaves user at ride selection screen. Uses direct keyboard simulation for speed.
+    Fully automated Uber ordering using Claude Code CLI with MCP browser tools.
+    This provides intelligent, visual-based browser automation.
+    """
+    log(f"Starting Uber order via Claude Code: from ({pickup_lat}, {pickup_lon}) to {destination}")
+
+    pickup_display = pickup_address if pickup_address else f"{pickup_lat}, {pickup_lon}"
+
+    prompt = f"""Order an Uber ride using the Chrome browser MCP tools.
+
+PICKUP LOCATION: {pickup_display} (coordinates: {pickup_lat}, {pickup_lon})
+DESTINATION: {destination}
+
+Instructions:
+1. First use tabs_context_mcp to get available tabs, then create a new tab with tabs_create_mcp
+2. Navigate to https://m.uber.com using the navigate tool
+3. Wait for the page to load, then take a screenshot to see the current state
+4. Find and click on the "Where to?" or destination input field
+5. Type "{destination}" into the destination field
+6. Wait for autocomplete suggestions to appear, then select the first result
+7. Take a final screenshot showing the ride options
+8. STOP before confirming - do NOT request the ride
+
+Be efficient and fast. Only take screenshots when needed to verify state."""
+
+    try:
+        result = subprocess.run(
+            ["claude", "-p", prompt, "--output-format", "json", "--allowedTools", "mcp__Claude_in_Chrome__*"],
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+
+        if result.returncode == 0:
+            log("Claude Code completed Uber automation successfully")
+            return {
+                'success': True,
+                'message': f'Uber ride to {destination} is ready!',
+                'pickup': pickup_display,
+                'destination': destination,
+                'status': 'Ride options should be visible in Chrome. Select your ride type and confirm.',
+                'claude_output': result.stdout[:500] if result.stdout else ''
+            }
+        else:
+            log(f"Claude Code error: {result.stderr}")
+            return {
+                'success': False,
+                'error': f'Claude Code failed: {result.stderr[:300]}',
+                'stdout': result.stdout[:300] if result.stdout else ''
+            }
+
+    except subprocess.TimeoutExpired:
+        log("Claude Code timed out")
+        return {'success': False, 'error': 'Uber ordering timed out after 120 seconds'}
+    except FileNotFoundError:
+        log("Claude CLI not found, falling back to AppleScript method")
+        # Fallback to basic AppleScript method
+        return order_uber_fallback(pickup_lat, pickup_lon, pickup_address, destination, ride_type)
+    except Exception as e:
+        log(f"Error: {e}")
+        return {'success': False, 'error': str(e)}
+
+
+def order_uber_fallback(pickup_lat, pickup_lon, pickup_address, destination, ride_type='UberX'):
+    """
+    Fallback Uber ordering using AppleScript when Claude CLI is not available.
     """
     import time
     import urllib.parse
 
-    log(f"Starting Uber order: from ({pickup_lat}, {pickup_lon}) to {destination}")
+    log(f"Using fallback AppleScript method for Uber order")
 
-    # Step 1: Build URL with pickup coordinates embedded
+    # Build URL with pickup coordinates
     pickup_data = json.dumps({"latitude": pickup_lat, "longitude": pickup_lon})
     uber_url = "https://m.uber.com/go/home?pickup=" + urllib.parse.quote(pickup_data)
 
-    # Open Chrome and navigate directly to Uber with pickup set
+    # Open Chrome and navigate
     script = '''
 tell application "Google Chrome"
     activate
@@ -842,56 +905,17 @@ end tell
     if result.returncode != 0:
         return {'success': False, 'error': 'Failed to open Chrome'}
 
-    log("Opened Uber with pickup location, waiting for load...")
     time.sleep(4)
-
-    # Step 2: Click on dropoff field using AppleScript mouse click at known position
-    # The dropoff field is in the left panel, second input field
-    click_dropoff = '''
-tell application "Google Chrome"
-    activate
-end tell
-delay 0.3
-tell application "System Events"
-    -- Click on the "Dropoff location" field (approximate position in left panel)
-    click at {200, 200}
-end tell
-'''
-    subprocess.run(['osascript', '-e', click_dropoff], capture_output=True, text=True, timeout=5)
-    time.sleep(1.5)
-
-    # Step 3: Type the destination using System Events (fast keyboard input)
-    safe_dest = destination.replace('"', '\\"').replace("'", "'")
-    type_dest = f'''
-tell application "System Events"
-    keystroke "{safe_dest}"
-end tell
-'''
-    subprocess.run(['osascript', '-e', type_dest], capture_output=True, text=True, timeout=5)
-    log(f"Typed destination: {destination}")
-    time.sleep(2)  # Wait for autocomplete
-
-    # Step 4: Press down arrow and enter to select first autocomplete result
-    select_result = '''
-tell application "System Events"
-    key code 125  -- down arrow
-    delay 0.3
-    key code 36   -- enter/return
-end tell
-'''
-    subprocess.run(['osascript', '-e', select_result], capture_output=True, text=True, timeout=5)
-    log("Selected first autocomplete result")
-    time.sleep(2)
 
     pickup_display = pickup_address if pickup_address else f"{pickup_lat}, {pickup_lon}"
 
     return {
         'success': True,
-        'message': f'Uber ride setup complete! Pickup: {pickup_display}, Destination: {destination}',
+        'message': f'Uber opened with pickup at {pickup_display}. Please manually enter destination: {destination}',
         'pickup': pickup_display,
         'destination': destination,
-        'status': 'Ready to select ride type and confirm. The user should now see ride options in Chrome.',
-        'user_action_required': 'Select your preferred ride type (UberX, Comfort, etc.) and tap "Confirm" to request the ride.'
+        'status': 'Opened Uber page - manual destination entry required (Claude CLI not available)',
+        'user_action_required': f'Enter "{destination}" in the destination field and select a ride.'
     }
 
 
