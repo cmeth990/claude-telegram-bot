@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/sessions/eloquent-serene-cray/mnt/cmethod/Desktop/Claude_Bot/claude_telegram_bot/bot.py", line 3, in <module>
+    from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+ModuleNotFoundError: No module named 'telegram'

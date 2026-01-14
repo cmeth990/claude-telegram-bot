@@ -41,10 +41,18 @@ MAC_TOOLS = [
      "input_schema": {"type": "object", "properties": {"min_width": {"type": "integer"}, "min_height": {"type": "integer"}}, "required": []}},
     {"name": "download_selected_images", "description": """Download specific images by index. Pass the indices of images you want to download (from list_page_images). Returns clean image files with their source links.""",
      "input_schema": {"type": "object", "properties": {"indices": {"type": "array", "items": {"type": "integer"}, "description": "List of image indices to download"}}, "required": ["indices"]}},
-    {"name": "order_uber", "description": """Order an Uber ride using the user's shared location. ALWAYS use this tool for Uber rides - it uses fast browser automation. User must have shared their location first via Telegram. The destination can be an address string.""",
-     "input_schema": {"type": "object", "properties": {"destination": {"type": "string", "description": "Destination address or place name"}, "ride_type": {"type": "string", "enum": ["UberX", "Comfort", "UberXL", "Black"], "description": "Type of Uber ride (default: UberX)"}}, "required": ["destination"]}},
+    {"name": "order_uber", "description": """Order an Uber ride using the user's shared location. ALWAYS use this tool for Uber rides - it uses fast browser automation. User must have shared their location first via Telegram. Ask the user how many passengers before ordering - if >4, UberXL will be selected automatically.""",
+     "input_schema": {"type": "object", "properties": {"destination": {"type": "string", "description": "Destination address or place name"}, "num_passengers": {"type": "integer", "description": "Number of passengers (if >4, UberXL is selected automatically)", "default": 1}, "ride_type": {"type": "string", "enum": ["UberX", "Comfort", "UberXL", "Black"], "description": "Type of Uber ride (default: UberX, auto-set to UberXL if num_passengers > 4)"}}, "required": ["destination", "num_passengers"]}},
     {"name": "get_user_location", "description": """Get the user's current stored location (latitude, longitude, and address if available). Returns error if user hasn't shared location.""",
-     "input_schema": {"type": "object", "properties": {}, "required": []}}
+     "input_schema": {"type": "object", "properties": {}, "required": []}},
+    {"name": "order_uber_eats", "description": """Order food via Uber Eats using browser automation. User must have shared location first.
+    - cuisine_type: Filter by cuisine (pizza, sushi, mexican, thai, chinese, indian, etc.)
+    - surprise_me: If true, selects 'Best Overall' restaurant, researches top dishes online, and orders the highest recommended item
+    Returns progress updates and final order status.""",
+     "input_schema": {"type": "object", "properties": {
+         "cuisine_type": {"type": "string", "description": "Type of cuisine to search for (pizza, sushi, mexican, etc.)"},
+         "surprise_me": {"type": "boolean", "description": "If true, auto-select best restaurant and top-rated dish", "default": False}
+     }, "required": []}}
 ]
 
 def call_mac(action, timeout=30.0, **kwargs):
@@ -134,8 +142,9 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"📍 Location saved!\n\n{user_locations[user_id].get('address', 'Unknown')}\n\n"
-        "You can now ask me to order an Uber. Just say something like:\n"
-        "\"Order an Uber to [destination]\"",
+        "What would you like to do?\n\n"
+        "🚗 Enter a destination for an Uber ride\n"
+        "🍔 Type 'food' for Uber Eats",
         reply_markup=ReplyKeyboardRemove()
     )
 
@@ -157,10 +166,31 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         system_prompt = f"""You control a Mac with Chrome browser.
 
-UBER ORDERING:
-- First check if user has shared location using get_user_location. If not, tell them to use /location command.
-- Use order_uber tool with the destination - it handles everything automatically using fast browser automation.
-- DO NOT try to manually control the browser for Uber - just use order_uber.
+AFTER USER SHARES LOCATION:
+When user shares location, they see two options:
+1. Enter a destination → Uber ride
+2. Type 'food' → Uber Eats
+
+UBER RIDES:
+- If user types a destination (address, place name, airport, etc.): Order an Uber ride
+- MANDATORY: Ask "More than 4 passengers?" BEFORE calling order_uber
+  - If YES: use num_passengers=5 (selects UberXL)
+  - If NO: use num_passengers=1 (selects UberX)
+- Only after user answers, call order_uber with destination AND num_passengers
+- DO NOT try to manually control the browser for Uber - just use order_uber
+
+UBER EATS:
+- If user types 'food' or asks about Uber Eats, ask them:
+  "What type of food? You can:
+   • Type a cuisine (pizza, sushi, mexican, thai, etc.)
+   • Type 'surprise me' for a top-rated recommendation"
+
+- If user picks a cuisine: call order_uber_eats with cuisine_type set to their choice
+- If user says 'surprise me': call order_uber_eats with surprise_me=true
+  This will find the best-rated restaurant, research top dishes online, and order the #1 recommended item
+
+LOCATION CHECK:
+- If user tries to order without sharing location, tell them to use /location command first
 {location_context}
 
 IMAGE CAPTURE:
@@ -260,7 +290,9 @@ AVOID take_screenshot for webpage images - it creates overlapping crops. Only us
                         else:
                             loc = user_locations[user_id]
                             destination = tool_input.get("destination", "")
-                            await update.message.reply_text(f"🚗 Ordering Uber to {destination}...")
+                            num_passengers = tool_input.get("num_passengers", 1)
+                            ride_type = tool_input.get("ride_type", "UberX")
+                            await update.message.reply_text(f"🚗 Ordering Uber to {destination} for {num_passengers} passenger(s)...")
                             # Agent.py now handles Claude CLI integration for fast browser automation
                             # Use longer timeout (150s) since Claude Code may take up to 120s
                             result = call_mac(
@@ -270,7 +302,30 @@ AVOID take_screenshot for webpage images - it creates overlapping crops. Only us
                                 pickup_lon=loc["lon"],
                                 pickup_address=loc.get("address", ""),
                                 destination=destination,
-                                ride_type=tool_input.get("ride_type", "UberX")
+                                ride_type=ride_type,
+                                num_passengers=num_passengers
+                            )
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "order_uber_eats":
+                        if user_id not in user_locations:
+                            result = {"success": False, "error": "User has not shared their location. Tell them to use /location command first."}
+                        else:
+                            loc = user_locations[user_id]
+                            cuisine_type = tool_input.get("cuisine_type", "")
+                            surprise_me = tool_input.get("surprise_me", False)
+                            if surprise_me:
+                                await update.message.reply_text("🍔 Finding the best restaurant and top-rated dish for you...")
+                            else:
+                                await update.message.reply_text(f"🍔 Searching for {cuisine_type} restaurants near you...")
+                            # Call the Uber Eats automation - longer timeout for research
+                            result = call_mac(
+                                "order_uber_eats",
+                                timeout=180.0,
+                                pickup_lat=loc["lat"],
+                                pickup_lon=loc["lon"],
+                                pickup_address=loc.get("address", ""),
+                                cuisine_type=cuisine_type,
+                                surprise_me=surprise_me
                             )
                         tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
             for screenshot in screenshots_to_send:
