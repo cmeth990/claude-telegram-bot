@@ -30,7 +30,7 @@ MAC_TOOLS = [
     {"name": "list_windows", "description": "List all open windows with their application names", "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "get_window_bounds", "description": "Get the position and size of a specific application window", "input_schema": {"type": "object", "properties": {"app_name": {"type": "string", "description": "Application name"}}, "required": ["app_name"]}},
     {"name": "scroll_page", "description": "Scroll the page in the specified application. Direction: 'down' or 'up'. Amount: number of times to press arrow key (default 3)", "input_schema": {"type": "object", "properties": {"app_name": {"type": "string", "description": "Application name (default: Google Chrome)"}, "direction": {"type": "string", "enum": ["down", "up"], "description": "Scroll direction"}, "amount": {"type": "integer", "description": "Number of times to scroll (default 3)"}}, "required": []}},
-    {"name": "execute_javascript_in_chrome", "description": "Execute JavaScript code in the active Chrome tab. Returns the result. Useful for extracting page data, URLs, element positions, etc. IMPORTANT for Pinterest: Use this selector to find actual pin IMAGE containers (not sidebar links): document.querySelectorAll('[data-test-id=\"pin\"], [data-test-id=\"pinWrapper\"], div[class*=\"pinWrapper\"]'). Get parent anchor tag for URL. Example: Array.from(document.querySelectorAll('[data-test-id=\"pin\"]')).slice(0,5).map(pin => {const a = pin.closest('a') || pin.querySelector('a[href*=\"/pin/\"]'); const rect = pin.getBoundingClientRect(); return {url: a?.href || 'no-url', x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)}})", "input_schema": {"type": "object", "properties": {"js_code": {"type": "string", "description": "JavaScript code to execute"}}, "required": ["js_code"]}},
+    {"name": "execute_javascript_in_chrome", "description": "Execute JavaScript code in the active Chrome tab. Returns the result. Useful for extracting page data, URLs, element positions, etc. IMPORTANT for Pinterest: (1) To SEARCH, use the search input on the page - find it with document.querySelector('input[data-test-id=\"search-box-input\"]') or document.querySelector('input[name=\"searchBoxInput\"]'), set its value, and trigger Enter key. DO NOT use browser address bar for searching. (2) To find pin IMAGE containers (not sidebar links): document.querySelectorAll('[data-test-id=\"pin\"], [data-test-id=\"pinWrapper\"], div[class*=\"pinWrapper\"]'). Get parent anchor tag for URL. Example: Array.from(document.querySelectorAll('[data-test-id=\"pin\"]')).slice(0,5).map(pin => {const a = pin.closest('a') || pin.querySelector('a[href*=\"/pin/\"]'); const rect = pin.getBoundingClientRect(); return {url: a?.href || 'no-url', x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)}})", "input_schema": {"type": "object", "properties": {"js_code": {"type": "string", "description": "JavaScript code to execute"}}, "required": ["js_code"]}},
     {"name": "kill_mac_agent", "description": "Kill and restart the Mac agent process. Use this if the agent is stuck or not responding.", "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "check_mac_status", "description": "Check if Mac is online", "input_schema": {"type": "object", "properties": {}, "required": []}}
 ]
@@ -79,15 +79,8 @@ async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Cleared!")
 
 async def restart_mac_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Kill and restart the Mac agent and clear conversation"""
     user_id = update.effective_user.id
-    await update.message.reply_text(
-        "🔄 Restarting system...\n\n"
-        "⚠️ This will:\n"
-        "• Stop all running processes\n"
-        "• Clear your conversation history\n"
-        "• Require manual restart of Mac agent"
-    )
+    await update.message.reply_text("🔄 Restarting system...\n\n⚠️ This will:\n• Stop all running processes\n• Clear your conversation history\n• Require manual restart of Mac agent")
     status_msg = "📊 Checking active processes...\n"
     try:
         check_result = call_mac("execute", command="ps aux | grep -E 'agent.py|screencapture|osascript' | grep -v grep | wc -l")
@@ -99,8 +92,7 @@ async def restart_mac_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_conversations[user_id] = []
     if user_id in screenshot_metadata:
         screenshot_metadata[user_id] = []
-    status_msg += "• ✅ Conversation history cleared\n"
-    status_msg += "• ✅ Screenshot queue cleared\n"
+    status_msg += "• ✅ Conversation history cleared\n• ✅ Screenshot queue cleared\n"
     await update.message.reply_text(status_msg)
     await update.message.reply_text("🛑 Stopping Mac agent...")
     try:
@@ -111,38 +103,14 @@ async def restart_mac_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if verify_result.get("success"):
             remaining = verify_result.get("stdout", "0").strip()
             if remaining == "0":
-                await update.message.reply_text(
-                    "✅ All processes stopped!\n\n"
-                    "📋 Verification:\n"
-                    "• Mac agent: Stopped\n"
-                    "• Screenshot processes: Stopped\n"
-                    "• AppleScript processes: Stopped\n\n"
-                    "⚠️ To restart Mac agent:\n"
-                    "cd ~/claude_mac_agent && python3 agent.py"
-                )
+                await update.message.reply_text("✅ All processes stopped!\n\n📋 Verification:\n• Mac agent: Stopped\n• Screenshot processes: Stopped\n• AppleScript processes: Stopped\n\n⚠️ To restart Mac agent:\ncd ~/claude_mac_agent && python3 agent.py")
             else:
-                await update.message.reply_text(
-                    f"⚠️ Some processes still running ({remaining})\n\n"
-                    "Run manually:\n"
-                    "pkill -9 -f agent.py\n"
-                    "pkill -9 screencapture\n"
-                    "pkill -9 osascript\n\n"
-                    "Then restart:\n"
-                    "cd ~/claude_mac_agent && python3 agent.py"
-                )
+                await update.message.reply_text(f"⚠️ Some processes still running ({remaining})\n\nRun manually:\npkill -9 -f agent.py\npkill -9 screencapture\npkill -9 osascript\n\nThen restart:\ncd ~/claude_mac_agent && python3 agent.py")
         else:
-            await update.message.reply_text(
-                "✅ Kill command sent!\n\n"
-                "⚠️ To restart Mac agent:\n"
-                "cd ~/claude_mac_agent && python3 agent.py"
-            )
+            await update.message.reply_text("✅ Kill command sent!\n\n⚠️ To restart Mac agent:\ncd ~/claude_mac_agent && python3 agent.py")
     except Exception as e:
         logger.error(f"Restart error: {e}")
-        await update.message.reply_text(
-            "⚠️ Could not verify process status\n\n"
-            "Manually restart:\n"
-            "pkill -9 -f agent.py && cd ~/claude_mac_agent && python3 agent.py"
-        )
+        await update.message.reply_text("⚠️ Could not verify process status\n\nManually restart:\npkill -9 -f agent.py && cd ~/claude_mac_agent && python3 agent.py")
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -155,7 +123,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         tools = MAC_TOOLS if (MAC_IP and MAC_PORT and MAC_SECRET) else None
         response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=4096, messages=user_conversations[user_id], tools=tools if tools else anthropic.NOT_GIVEN)
-        
         while response.stop_reason == "tool_use":
             assistant_content = response.content
             user_conversations[user_id].append({"role": "assistant", "content": assistant_content})
@@ -240,7 +207,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     logger.error(f"Failed to send screenshot {idx+1}: {e}")
             user_conversations[user_id].append({"role": "user", "content": tool_results})
             response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=4096, messages=user_conversations[user_id], tools=tools if tools else anthropic.NOT_GIVEN)
-        
         assistant_message = ""
         for block in response.content:
             if hasattr(block, "text"):
