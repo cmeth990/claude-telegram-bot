@@ -26,72 +26,19 @@ MAC_TOOLS = [
     {"name": "execute_mac_command", "description": "Execute a shell command on the Mac", "input_schema": {"type": "object", "properties": {"command": {"type": "string", "description": "Shell command"}}, "required": ["command"]}},
     {"name": "execute_applescript", "description": "Execute AppleScript to control Mac applications", "input_schema": {"type": "object", "properties": {"script": {"type": "string", "description": "AppleScript code"}}, "required": ["script"]}},
     {"name": "read_mac_file", "description": "Read file contents", "input_schema": {"type": "object", "properties": {"filepath": {"type": "string"}}, "required": ["filepath"]}},
-    {"name": "take_screenshot", "description": """Take a screenshot. Modes:
-- 'full': entire screen
-- 'window': specific app window (requires app_name like 'Google Chrome')
-- 'region': specific screen coordinates (requires region object)
-
-FOR REGION MODE - CRITICAL COORDINATE CONVERSION:
-Coordinates MUST be SCREEN coordinates, NOT viewport coordinates.
-When getting element positions from JavaScript, you MUST add window.screenX and window.screenY:
-
-CORRECT way to get region coords:
-const rect = element.getBoundingClientRect();
-const region = {
-    x: Math.round(rect.left + window.screenX),
-    y: Math.round(rect.top + window.screenY),
-    width: Math.round(rect.width),
-    height: Math.round(rect.height)
-};
-
-WRONG (will capture wrong area):
-const region = {x: rect.left, y: rect.top, ...}  // Missing screenX/screenY!
-
-FOR PINTEREST/GENERAL WORKFLOW:
-- Use 'window' mode with app_name='Google Chrome' for full browser capture (most reliable)
-- Only use 'region' mode if you need a specific element AND properly convert coordinates
-
-Optional: include 'metadata' object with 'url', 'title', 'description' to attach to screenshot.""",
-     "input_schema": {"type": "object", "properties": {"mode": {"type": "string", "enum": ["full", "window", "region"], "description": "Screenshot mode"}, "app_name": {"type": "string", "description": "Application name for window mode"}, "region": {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}, "width": {"type": "integer"}, "height": {"type": "integer"}}, "description": "Region coordinates - MUST be screen coords (add window.screenX/Y to viewport coords)"}, "metadata": {"type": "object", "properties": {"url": {"type": "string"}, "title": {"type": "string"}, "description": {"type": "string"}}}}, "required": []}},
-    {"name": "list_windows", "description": "List all open windows with their application names", "input_schema": {"type": "object", "properties": {}, "required": []}},
-    {"name": "get_window_bounds", "description": "Get the position and size of a specific application window", "input_schema": {"type": "object", "properties": {"app_name": {"type": "string", "description": "Application name"}}, "required": ["app_name"]}},
-    {"name": "scroll_page", "description": "Scroll the page in the specified application. Direction: 'down' or 'up'. Amount: number of times to press arrow key (default 3)", "input_schema": {"type": "object", "properties": {"app_name": {"type": "string", "description": "Application name (default: Google Chrome)"}, "direction": {"type": "string", "enum": ["down", "up"], "description": "Scroll direction"}, "amount": {"type": "integer", "description": "Number of times to scroll (default 3)"}}, "required": []}},
-    {"name": "execute_javascript_in_chrome", "description": """Execute JavaScript code in the active Chrome tab. Returns the result.
-
-IMPORTANT for getting SCREEN COORDINATES for screenshots:
-To get an element's position for take_screenshot region mode, you MUST convert viewport coords to screen coords:
-
-// Get element screen position (for take_screenshot region mode)
-const el = document.querySelector('your-selector');
-const rect = el.getBoundingClientRect();
-JSON.stringify({
-    x: Math.round(rect.left + window.screenX),
-    y: Math.round(rect.top + window.screenY),
-    width: Math.round(rect.width),
-    height: Math.round(rect.height)
-});
-
-For Pinterest - IMPORTANT:
-- To SEARCH: find input with document.querySelector('input[data-test-id="search-box-input"]'), set value, trigger Enter
-- To find MAIN PINS (not thumbnails): You must filter by image size!
-
-  // Get main pins (skip small thumbnails like featured boards which are ~156x155)
-  const allPins = Array.from(document.querySelectorAll('[data-test-id="pin"]'));
-  const mainPins = allPins.filter(pin => {
-      const img = pin.querySelector('img');
-      if (!img) return false;
-      const rect = img.getBoundingClientRect();
-      // Main pins are typically 200+ pixels wide, featured board thumbnails are ~156px
-      return rect.width > 200 && rect.y > 300;  // Also check Y to skip header area
-  });
-
-- Get pin URL: pin.closest('a')?.href
-- Get pin image for screenshot: pin.querySelector('img')
-- CRITICAL: When taking region screenshots of pins, target the IMG element inside the pin, not the pin container""",
-     "input_schema": {"type": "object", "properties": {"js_code": {"type": "string", "description": "JavaScript code to execute"}}, "required": ["js_code"]}},
-    {"name": "wait", "description": "Wait for a specified number of seconds. Use this to allow pages to load, search results to appear, or animations to complete.", "input_schema": {"type": "object", "properties": {"seconds": {"type": "integer", "description": "Number of seconds to wait (1-30)"}}, "required": ["seconds"]}},
-    {"name": "kill_mac_agent", "description": "Kill and restart the Mac agent process. Use this if the agent is stuck or not responding.", "input_schema": {"type": "object", "properties": {}, "required": []}},
-    {"name": "check_mac_status", "description": "Check if Mac is online", "input_schema": {"type": "object", "properties": {}, "required": []}}
+    {"name": "take_screenshot", "description": """Take a screenshot. Modes: 'full', 'window' (requires app_name), 'region' (requires region with x,y,width,height as SCREEN coordinates).""",
+     "input_schema": {"type": "object", "properties": {"mode": {"type": "string", "enum": ["full", "window", "region"]}, "app_name": {"type": "string"}, "region": {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}, "width": {"type": "integer"}, "height": {"type": "integer"}}}}, "required": []}},
+    {"name": "list_windows", "description": "List all open windows", "input_schema": {"type": "object", "properties": {}, "required": []}},
+    {"name": "get_window_bounds", "description": "Get window position and size", "input_schema": {"type": "object", "properties": {"app_name": {"type": "string"}}, "required": ["app_name"]}},
+    {"name": "scroll_page", "description": "Scroll page up or down", "input_schema": {"type": "object", "properties": {"app_name": {"type": "string"}, "direction": {"type": "string", "enum": ["down", "up"]}, "amount": {"type": "integer"}}, "required": []}},
+    {"name": "execute_javascript_in_chrome", "description": "Execute JavaScript in Chrome's active tab", "input_schema": {"type": "object", "properties": {"js_code": {"type": "string"}}, "required": ["js_code"]}},
+    {"name": "wait", "description": "Wait for seconds (1-30)", "input_schema": {"type": "object", "properties": {"seconds": {"type": "integer"}}, "required": ["seconds"]}},
+    {"name": "check_mac_status", "description": "Check if Mac is online", "input_schema": {"type": "object", "properties": {}, "required": []}},
+    {"name": "capture_images", "description": """RECOMMENDED: Capture multiple images from current webpage in ONE call.
+Finds visible images, filters by size, screenshots each, returns with URLs.
+Use this instead of manual JavaScript + screenshots. Just navigate to page first, wait, then call this.
+Returns: {screenshots: [{image_data, url, alt, width, height}...], page_title, page_url, count}""",
+     "input_schema": {"type": "object", "properties": {"count": {"type": "integer", "description": "Max images (default 5)"}, "min_width": {"type": "integer", "description": "Min width px (default 150)"}, "min_height": {"type": "integer", "description": "Min height px (default 150)"}}, "required": []}}
 ]
 
 def call_mac(action, **kwargs):
@@ -125,7 +72,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if MAC_IP and MAC_PORT and MAC_SECRET:
         if call_mac("ping").get("success"):
             mac_status = "Online"
-    await update.message.reply_text(f"Welcome!\n\nMac: {mac_status}\n\nCommands: /start /clear /help /restart")
+    await update.message.reply_text(f"Welcome!\n\nMac: {mac_status}\n\nCommands: /start /clear /help")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
@@ -133,50 +80,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_conversations[user_id] = []
-    if user_id in screenshot_metadata:
-        screenshot_metadata[user_id] = []
     await update.message.reply_text("Cleared!")
-
-async def restart_mac_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    await update.message.reply_text("Restarting system...\n\nThis will:\nStop all running processes\nClear your conversation history\nRequire manual restart of Mac agent")
-    status_msg = "Checking active processes...\n"
-    try:
-        check_result = call_mac("execute", command="ps aux | grep -E 'agent.py|screencapture|osascript' | grep -v grep | wc -l")
-        if check_result.get("success"):
-            process_count = check_result.get("stdout", "0").strip()
-            status_msg += f"Found {process_count} Mac agent process(es)\n"
-    except:
-        status_msg += "Unable to check Mac processes\n"
-    user_conversations[user_id] = []
-    if user_id in screenshot_metadata:
-        screenshot_metadata[user_id] = []
-    status_msg += "Conversation history cleared\nScreenshot queue cleared\n"
-    await update.message.reply_text(status_msg)
-    await update.message.reply_text("Stopping Mac agent...")
-    try:
-        kill_result = call_mac("execute", command="pkill -9 -f agent.py; pkill -9 screencapture; pkill -9 osascript")
-        import asyncio
-        await asyncio.sleep(1)
-        verify_result = call_mac("execute", command="ps aux | grep -E 'agent.py|screencapture|osascript' | grep -v grep | wc -l")
-        if verify_result.get("success"):
-            remaining = verify_result.get("stdout", "0").strip()
-            if remaining == "0":
-                await update.message.reply_text("All processes stopped!\n\nVerification:\nMac agent: Stopped\nScreenshot processes: Stopped\nAppleScript processes: Stopped\n\nTo restart Mac agent:\ncd ~/claude_mac_agent && python3 agent.py")
-            else:
-                await update.message.reply_text(f"Some processes still running ({remaining})\n\nRun manually:\npkill -9 -f agent.py\npkill -9 screencapture\npkill -9 osascript\n\nThen restart:\ncd ~/claude_mac_agent && python3 agent.py")
-        else:
-            await update.message.reply_text("Kill command sent!\n\nTo restart Mac agent:\ncd ~/claude_mac_agent && python3 agent.py")
-    except Exception as e:
-        logger.error(f"Restart error: {e}")
-        await update.message.reply_text("Could not verify process status\n\nManually restart:\npkill -9 -f agent.py && cd ~/claude_mac_agent && python3 agent.py")
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in user_conversations:
         user_conversations[user_id] = []
-    if user_id not in screenshot_metadata:
-        screenshot_metadata[user_id] = []
     user_conversations[user_id].append({"role": "user", "content": update.message.text})
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
@@ -208,26 +117,19 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                         result = call_mac("get_window_bounds", app_name=tool_input["app_name"])
                         tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
                     elif tool_name == "scroll_page":
-                        app_name = tool_input.get("app_name", "Google Chrome")
-                        direction = tool_input.get("direction", "down")
-                        amount = tool_input.get("amount", 3)
-                        result = call_mac("scroll", app_name=app_name, direction=direction, amount=amount)
+                        result = call_mac("scroll", app_name=tool_input.get("app_name", "Google Chrome"), direction=tool_input.get("direction", "down"), amount=tool_input.get("amount", 3))
                         tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
                     elif tool_name == "execute_javascript_in_chrome":
                         result = call_mac("execute_js", js_code=tool_input["js_code"])
                         tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
                     elif tool_name == "take_screenshot":
                         mode = tool_input.get("mode", "full")
-                        app_name = tool_input.get("app_name")
-                        region = tool_input.get("region")
-                        metadata = tool_input.get("metadata", {})
-                        result = call_mac("screenshot", mode=mode, app_name=app_name, region=region)
+                        result = call_mac("screenshot", mode=mode, app_name=tool_input.get("app_name"), region=tool_input.get("region"))
                         if result.get("success") and result.get("filepath"):
                             image_result = call_mac("read_image", filepath=result["filepath"])
                             if image_result.get("success") and image_result.get("image_data"):
-                                screenshot_data = {"data": image_result["image_data"], "mode": mode, "app": app_name, "url": metadata.get("url"), "title": metadata.get("title"), "description": metadata.get("description")}
-                                screenshots_to_send.append(screenshot_data)
-                                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_result["image_data"]}}, {"type": "text", "text": f"Screenshot captured ({mode} mode). Metadata: {json.dumps(metadata)}"}]})
+                                screenshots_to_send.append({"data": image_result["image_data"], "mode": mode})
+                                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_result["image_data"]}}, {"type": "text", "text": f"Screenshot captured ({mode})"}]})
                             else:
                                 tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps({"success": False, "error": "Failed to read"})})
                         else:
@@ -236,30 +138,31 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                         seconds = min(max(tool_input.get("seconds", 3), 1), 30)
                         import asyncio
                         await asyncio.sleep(seconds)
-                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps({"success": True, "message": f"Waited {seconds} seconds"})})
-                    elif tool_name == "kill_mac_agent":
-                        result = call_mac("kill_agent")
-                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps({"success": True, "message": f"Waited {seconds}s"})})
                     elif tool_name == "check_mac_status":
                         result = call_mac("ping")
                         tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "capture_images":
+                        result = call_mac("capture_images", count=tool_input.get("count", 5), min_width=tool_input.get("min_width", 150), min_height=tool_input.get("min_height", 150))
+                        if result.get("success") and result.get("screenshots"):
+                            for i, img in enumerate(result["screenshots"]):
+                                screenshots_to_send.append({"data": img["image_data"], "url": img.get("url", ""), "title": img.get("alt", f"Image {i+1}"), "mode": "capture", "description": f"{img.get('width', '?')}x{img.get('height', '?')}px"})
+                            summary = {"success": True, "count": result["count"], "page_title": result.get("page_title", ""), "page_url": result.get("page_url", ""), "images": [{"url": s["url"], "alt": s.get("alt", ""), "width": s["width"], "height": s["height"]} for s in result["screenshots"]]}
+                            tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(summary)})
+                        else:
+                            tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
             for idx, screenshot in enumerate(screenshots_to_send):
                 try:
                     screenshot_bytes = base64.b64decode(screenshot["data"])
                     caption_parts = [f"Screenshot {idx+1}"]
                     if screenshot.get("title"):
                         caption_parts.append(f"{screenshot['title']}")
-                    if screenshot.get("mode"):
-                        caption_parts.append(f"({screenshot['mode']} mode)")
-                    if screenshot.get("app"):
-                        caption_parts.append(f"- {screenshot['app']}")
                     if screenshot.get("description"):
                         caption_parts.append(f"\n{screenshot['description']}")
                     if screenshot.get("url"):
                         caption_parts.append(f"\n{screenshot['url']}")
                     caption = " ".join(caption_parts)
                     await update.message.reply_photo(photo=io.BytesIO(screenshot_bytes), caption=caption)
-                    logger.info(f"Screenshot {idx+1} sent with metadata: {screenshot.get('url', 'no url')}")
                 except Exception as e:
                     logger.error(f"Failed to send screenshot {idx+1}: {e}")
             user_conversations[user_id].append({"role": "user", "content": tool_results})
@@ -276,12 +179,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
         await update.message.reply_text(f"Error: {str(e)}")
-
-async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Voice needs OPENAI_API_KEY")
-
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Document processing available")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -312,10 +209,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("clear", clear_history))
-    application.add_handler(CommandHandler("restart", restart_mac_agent))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
-    application.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     logger.info("Starting bot...")
     logger.info(f"Mac: {MAC_IP}:{MAC_PORT}")
