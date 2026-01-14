@@ -166,14 +166,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                         if result.get("success") and result.get("filepath"):
                             image_result = call_mac("read_image", filepath=result["filepath"])
                             if image_result.get("success") and image_result.get("image_data"):
-                                screenshot_data = {
-                                    "data": image_result["image_data"],
-                                    "mode": mode,
-                                    "app": app_name,
-                                    "url": metadata.get("url"),
-                                    "title": metadata.get("title"),
-                                    "description": metadata.get("description")
-                                }
+                                screenshot_data = {"data": image_result["image_data"], "mode": mode, "app": app_name, "url": metadata.get("url"), "title": metadata.get("title"), "description": metadata.get("description")}
                                 screenshots_to_send.append(screenshot_data)
                                 tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_result["image_data"]}}, {"type": "text", "text": f"Screenshot captured ({mode} mode). Metadata: {json.dumps(metadata)}"}]})
                             else:
