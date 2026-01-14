@@ -96,7 +96,17 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
         tools = MAC_TOOLS if (MAC_IP and MAC_PORT and MAC_SECRET) else None
-        response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=4096, messages=user_conversations[user_id], tools=tools if tools else anthropic.NOT_GIVEN)
+        system_prompt = """You are controlling a Mac computer. When capturing images from web pages:
+
+PREFERRED: Use the visual curation workflow:
+1. Take a window screenshot to see the page
+2. Call list_page_images to get image metadata
+3. Based on what you see, call download_selected_images with specific indices
+
+AVOID: Don't use capture_images unless the user just wants any random images quickly.
+
+The visual curation workflow gives you control to pick the BEST images that match what the user wants."""
+        response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=4096, system=system_prompt, messages=user_conversations[user_id], tools=tools if tools else anthropic.NOT_GIVEN)
         while response.stop_reason == "tool_use":
             assistant_content = response.content
             user_conversations[user_id].append({"role": "assistant", "content": assistant_content})
@@ -172,19 +182,20 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             for idx, screenshot in enumerate(screenshots_to_send):
                 try:
                     screenshot_bytes = base64.b64decode(screenshot["data"])
-                    caption_parts = [f"Screenshot {idx+1}"]
-                    if screenshot.get("title"):
-                        caption_parts.append(f"{screenshot['title']}")
-                    if screenshot.get("description"):
-                        caption_parts.append(f"\n{screenshot['description']}")
-                    if screenshot.get("url"):
-                        caption_parts.append(f"\n{screenshot['url']}")
-                    caption = " ".join(caption_parts)
-                    await update.message.reply_photo(photo=io.BytesIO(screenshot_bytes), caption=caption)
+                    caption = ""
+                    if screenshot.get("mode") == "selected" or screenshot.get("mode") == "capture":
+                        # For curated images, show clean caption with link
+                        if screenshot.get("title"):
+                            caption = screenshot["title"]
+                        if screenshot.get("url"):
+                            caption += f"\n\n{screenshot['url']}"
+                    else:
+                        caption = f"Screenshot {idx+1}"
+                    await update.message.reply_photo(photo=io.BytesIO(screenshot_bytes), caption=caption[:1024] if caption else None)
                 except Exception as e:
                     logger.error(f"Failed to send screenshot {idx+1}: {e}")
             user_conversations[user_id].append({"role": "user", "content": tool_results})
-            response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=4096, messages=user_conversations[user_id], tools=tools if tools else anthropic.NOT_GIVEN)
+            response = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=4096, system=system_prompt, messages=user_conversations[user_id], tools=tools if tools else anthropic.NOT_GIVEN)
         assistant_message = ""
         for block in response.content:
             if hasattr(block, "text"):
