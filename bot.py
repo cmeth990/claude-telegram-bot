@@ -71,10 +71,23 @@ JSON.stringify({
     height: Math.round(rect.height)
 });
 
-For Pinterest:
+For Pinterest - IMPORTANT:
 - To SEARCH: find input with document.querySelector('input[data-test-id="search-box-input"]'), set value, trigger Enter
-- To find pins: document.querySelectorAll('[data-test-id="pin"]')
-- Get pin URLs: pin.closest('a')?.href""",
+- To find MAIN PINS (not thumbnails): You must filter by image size!
+
+  // Get main pins (skip small thumbnails like featured boards which are ~156x155)
+  const allPins = Array.from(document.querySelectorAll('[data-test-id="pin"]'));
+  const mainPins = allPins.filter(pin => {
+      const img = pin.querySelector('img');
+      if (!img) return false;
+      const rect = img.getBoundingClientRect();
+      // Main pins are typically 200+ pixels wide, featured board thumbnails are ~156px
+      return rect.width > 200 && rect.y > 300;  // Also check Y to skip header area
+  });
+
+- Get pin URL: pin.closest('a')?.href
+- Get pin image for screenshot: pin.querySelector('img')
+- CRITICAL: When taking region screenshots of pins, target the IMG element inside the pin, not the pin container""",
      "input_schema": {"type": "object", "properties": {"js_code": {"type": "string", "description": "JavaScript code to execute"}}, "required": ["js_code"]}},
     {"name": "wait", "description": "Wait for a specified number of seconds. Use this to allow pages to load, search results to appear, or animations to complete.", "input_schema": {"type": "object", "properties": {"seconds": {"type": "integer", "description": "Number of seconds to wait (1-30)"}}, "required": ["seconds"]}},
     {"name": "kill_mac_agent", "description": "Kill and restart the Mac agent process. Use this if the agent is stuck or not responding.", "input_schema": {"type": "object", "properties": {}, "required": []}},
