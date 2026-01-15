@@ -59,8 +59,6 @@ MAC_TOOLS = [
      "input_schema": {"type": "object", "properties": {"indices": {"type": "array", "items": {"type": "integer"}, "description": "List of image indices to download"}}, "required": ["indices"]}},
     {"name": "order_uber", "description": """Order an Uber ride using the user's shared location. ALWAYS use this tool for Uber rides - it uses fast browser automation. User must have shared their location first via Telegram. Ask the user how many passengers before ordering - if >4, UberXL will be selected automatically.""",
      "input_schema": {"type": "object", "properties": {"destination": {"type": "string", "description": "Destination address or place name"}, "num_passengers": {"type": "integer", "description": "Number of passengers (if >4, UberXL is selected automatically)", "default": 1}, "ride_type": {"type": "string", "enum": ["UberX", "Comfort", "UberXL", "Black"], "description": "Type of Uber ride (default: UberX, auto-set to UberXL if num_passengers > 4)"}}, "required": ["destination", "num_passengers"]}},
-    {"name": "get_user_location", "description": """Get the user's current stored location (latitude, longitude, and address if available). Returns error if user hasn't shared location.""",
-     "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "order_uber_eats", "description": """Order food via Uber Eats using browser automation. User must have shared location first.
     - cuisine_type: Filter by cuisine (pizza, sushi, mexican, thai, chinese, indian, etc.)
     - surprise_me: If true, selects 'Best Overall' restaurant, researches top dishes online, and orders the highest recommended item
@@ -131,7 +129,11 @@ CLOUD_TOOLS = [
      "input_schema": {"type": "object", "properties": {"query": {"type": "string", "description": "Search query"}}, "required": ["query"]}},
     {"name": "get_current_time", "description": """Get the current date and time.""",
      "input_schema": {"type": "object", "properties": {"timezone": {"type": "string", "description": "Timezone (e.g., 'America/New_York', 'UTC')", "default": "local"}}, "required": []}},
+    {"name": "get_weather", "description": """Get current weather and forecast for user's location or a specified city. Uses the user's shared location by default, or you can specify a city name. Returns temperature, conditions, humidity, wind, and forecast.""",
+     "input_schema": {"type": "object", "properties": {"city": {"type": "string", "description": "City name (optional - uses user's location if not provided)"}, "units": {"type": "string", "enum": ["metric", "imperial"], "description": "Temperature units (default: imperial for Fahrenheit)"}}, "required": []}},
 ]
+
+OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY", "")
 
 async def call_mac_async(action, timeout=30.0, **kwargs):
     """Async call to Mac agent - runs in thread pool so bot stays responsive"""
@@ -375,6 +377,7 @@ IMAGE CAPTURE (when Mac available):
 USE capture_images - it downloads actual image files with their source links.
 
 CLOUD TOOLS (always available):
+- get_weather: Get current weather and forecast (uses user's location or specify a city)
 - web_search: Search for any information
 - get_current_time: Get current date/time
 - get_user_location: Access stored location
@@ -509,6 +512,87 @@ Be helpful, conversational, and proactive. If you can help with something even w
                             }
                         except Exception as e:
                             result = {"success": False, "error": str(e)}
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "get_weather":
+                        # Cloud tool - weather using OpenWeatherMap
+                        city = tool_input.get("city", "")
+                        units = tool_input.get("units", "imperial")
+
+                        try:
+                            import urllib.request
+                            import urllib.parse
+
+                            # Determine location - use city or user's coordinates
+                            if city:
+                                # Search by city name
+                                weather_url = f"https://api.openweathermap.org/data/2.5/weather?q={urllib.parse.quote(city)}&units={units}&appid={OPENWEATHER_API_KEY}"
+                                forecast_url = f"https://api.openweathermap.org/data/2.5/forecast?q={urllib.parse.quote(city)}&units={units}&cnt=8&appid={OPENWEATHER_API_KEY}"
+                            elif user_id in user_locations:
+                                # Use stored location
+                                loc = user_locations[user_id]
+                                weather_url = f"https://api.openweathermap.org/data/2.5/weather?lat={loc['lat']}&lon={loc['lon']}&units={units}&appid={OPENWEATHER_API_KEY}"
+                                forecast_url = f"https://api.openweathermap.org/data/2.5/forecast?lat={loc['lat']}&lon={loc['lon']}&units={units}&cnt=8&appid={OPENWEATHER_API_KEY}"
+                            else:
+                                result = {"success": False, "error": "No location available. Either specify a city or share your location with /location"}
+                                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                                continue
+
+                            if not OPENWEATHER_API_KEY:
+                                result = {"success": False, "error": "Weather API not configured. Add OPENWEATHER_API_KEY to environment."}
+                                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                                continue
+
+                            # Get current weather
+                            req = urllib.request.Request(weather_url, headers={'User-Agent': 'TelegramBot/1.0'})
+                            with urllib.request.urlopen(req, timeout=10) as response:
+                                weather_data = json.loads(response.read().decode())
+
+                            # Get forecast
+                            forecast_data = None
+                            try:
+                                req = urllib.request.Request(forecast_url, headers={'User-Agent': 'TelegramBot/1.0'})
+                                with urllib.request.urlopen(req, timeout=10) as response:
+                                    forecast_data = json.loads(response.read().decode())
+                            except:
+                                pass  # Forecast is optional
+
+                            temp_unit = "°F" if units == "imperial" else "°C"
+                            speed_unit = "mph" if units == "imperial" else "m/s"
+
+                            result = {
+                                "success": True,
+                                "location": weather_data.get("name", city),
+                                "current": {
+                                    "temperature": weather_data["main"]["temp"],
+                                    "feels_like": weather_data["main"]["feels_like"],
+                                    "temp_min": weather_data["main"]["temp_min"],
+                                    "temp_max": weather_data["main"]["temp_max"],
+                                    "humidity": weather_data["main"]["humidity"],
+                                    "conditions": weather_data["weather"][0]["description"],
+                                    "wind_speed": weather_data["wind"]["speed"],
+                                    "units": {"temp": temp_unit, "speed": speed_unit}
+                                }
+                            }
+
+                            # Add forecast if available
+                            if forecast_data and "list" in forecast_data:
+                                result["forecast"] = []
+                                for item in forecast_data["list"][:6]:
+                                    result["forecast"].append({
+                                        "time": item["dt_txt"],
+                                        "temp": item["main"]["temp"],
+                                        "conditions": item["weather"][0]["description"]
+                                    })
+
+                        except urllib.error.HTTPError as e:
+                            if e.code == 401:
+                                result = {"success": False, "error": "Invalid weather API key"}
+                            elif e.code == 404:
+                                result = {"success": False, "error": f"City not found: {city}"}
+                            else:
+                                result = {"success": False, "error": f"Weather API error: {e.code}"}
+                        except Exception as e:
+                            result = {"success": False, "error": f"Weather fetch failed: {str(e)}"}
                         tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
                     elif tool_name == "order_uber":
                         if user_id not in user_locations:
