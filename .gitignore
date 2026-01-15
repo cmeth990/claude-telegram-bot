@@ -1,1 +1,9 @@
 .env
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+*.log
+scheduled_tasks.json
+venv/
+.venv/

@@ -4,14 +4,40 @@ import json
 import subprocess
 import os
 import base64
+import threading
 from datetime import datetime
 
 PORT = 9999
 SECRET = os.environ.get('MAC_AGENT_SECRET', '0eea2cc233ae59295e0ac411d45b1eb5a886d71c0376d2abfe481f0ade12f334')
 SCREENSHOT_DIR = os.path.expanduser('~/Desktop')
 
+# Global interrupt flag - can be set by /stop command from Telegram
+INTERRUPT_FLAG = threading.Event()
+
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+def check_interrupt():
+    """Check if operation should be interrupted. Returns True if interrupted."""
+    if INTERRUPT_FLAG.is_set():
+        log("⚠️ INTERRUPT: Operation cancelled by user")
+        return True
+    return False
+
+def clear_interrupt():
+    """Clear the interrupt flag at start of new operation."""
+    INTERRUPT_FLAG.clear()
+
+def interruptible_sleep(seconds):
+    """Sleep that can be interrupted. Returns True if interrupted."""
+    import time
+    # Sleep in small increments to allow interrupt checking
+    end_time = time.time() + seconds
+    while time.time() < end_time:
+        if check_interrupt():
+            return True
+        time.sleep(min(0.5, end_time - time.time()))
+    return False
 
 def execute_command(command):
     try:
@@ -43,6 +69,279 @@ def read_image(filepath):
         with open(filepath, 'rb') as f:
             return {'success': True, 'image_data': base64.b64encode(f.read()).decode('utf-8')}
     except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+def get_spotify_current_track():
+    """Get currently playing track from Spotify desktop app via AppleScript."""
+    try:
+        import time
+
+        # Check if Spotify is running, if not launch it
+        check_script = '''
+        tell application "System Events"
+            set isRunning to (name of processes) contains "Spotify"
+        end tell
+        return isRunning
+        '''
+        result = subprocess.run(['osascript', '-e', check_script], capture_output=True, text=True, timeout=10)
+        is_running = result.stdout.strip() == 'true'
+
+        if not is_running:
+            log("🎵 Launching Spotify app...")
+            launch_script = 'tell application "Spotify" to activate'
+            subprocess.run(['osascript', '-e', launch_script], capture_output=True, text=True, timeout=10)
+            time.sleep(3)  # Wait for Spotify to launch
+
+        # Get current track info from Spotify app
+        track_script = '''
+        tell application "Spotify"
+            if player state is stopped then
+                return "STOPPED"
+            end if
+
+            set trackName to name of current track
+            set artistName to artist of current track
+            set albumName to album of current track
+            set trackId to id of current track
+            set trackDuration to duration of current track
+            set trackPopularity to popularity of current track
+
+            return trackName & "|||" & artistName & "|||" & albumName & "|||" & trackId & "|||" & trackDuration & "|||" & trackPopularity
+        end tell
+        '''
+
+        result = subprocess.run(['osascript', '-e', track_script], capture_output=True, text=True, timeout=10)
+
+        if result.returncode != 0:
+            return {'success': False, 'error': f'Could not get track info: {result.stderr}'}
+
+        output = result.stdout.strip()
+
+        if output == "STOPPED":
+            return {'success': False, 'error': 'No track playing. Play a song in Spotify first!'}
+
+        parts = output.split('|||')
+        if len(parts) < 4:
+            return {'success': False, 'error': 'Could not parse track info'}
+
+        track_name = parts[0]
+        artist = parts[1]
+        album = parts[2]
+        track_id = parts[3].replace('spotify:track:', '')  # Extract just the ID
+        duration_ms = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+        popularity = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0
+
+        log(f"🎵 Spotify track: {track_name} by {artist}")
+
+        track_info = {
+            'name': track_name,
+            'artist': artist,
+            'album': album,
+            'trackId': track_id,
+            'duration_ms': duration_ms,
+            'popularity': popularity
+        }
+
+        # Fetch Last.fm data for tags and wiki info
+        lastfm_data = get_lastfm_track_info(track_name, artist, album)
+
+        return {
+            'success': True,
+            'track_info': track_info,
+            'audio_features': None,  # Would need OAuth for Spotify API audio features
+            'lastfm': lastfm_data
+        }
+
+    except Exception as e:
+        log(f"❌ Error getting Spotify track: {str(e)}")
+        return {'success': False, 'error': str(e)}
+
+def get_lastfm_track_info(track_name, artist, album):
+    """Fetch track tags and wiki info from Last.fm API."""
+    try:
+        import requests
+        import re
+
+        # Last.fm API key - get yours free at https://www.last.fm/api/account/create
+        LASTFM_API_KEY = "b25b959554ed76058ac220b7b2e0a026"
+        base_url = "https://ws.audioscrobbler.com/2.0/"
+
+        result = {
+            'tags': [],
+            'track_wiki': None,
+            'album_wiki': None,
+            'artist_wiki': None,
+            'listeners': None,
+            'playcount': None,
+            'remixer': None
+        }
+
+        # Clean up track name for better Last.fm matching
+        clean_track = track_name
+        remixer = None
+
+        # Extract remix info
+        remix_match = re.search(r'\s*[-–]\s*(.+?)\s*(Remix|Mix|Edit|Dub|Version|Rework).*$', track_name, re.IGNORECASE)
+        if remix_match:
+            remixer = remix_match.group(1).strip()
+            clean_track = re.sub(r'\s*[-–]\s*.*(Remix|Mix|Edit|Dub|Version|Rework).*$', '', track_name, flags=re.IGNORECASE).strip()
+            result['remixer'] = f"{remixer} Remix"
+            log(f"🎛️ Detected remix by: {remixer}")
+
+        # Also try removing content in parentheses like "(feat. X)" or "(Radio Edit)"
+        clean_track_alt = re.sub(r'\s*\([^)]*\)\s*$', '', clean_track).strip()
+
+        # Get track info (includes tags and wiki) - try original first, then cleaned versions
+        search_attempts = [
+            (track_name, artist),  # Original
+            (clean_track, artist),  # Without remix suffix
+            (clean_track_alt, artist),  # Without parentheses
+        ]
+
+        # If there's a remixer, also try searching for them as artist
+        if remixer:
+            search_attempts.append((clean_track, remixer))
+
+        track_found = False
+        for search_track, search_artist in search_attempts:
+            if track_found:
+                break
+
+            track_params = {
+                'method': 'track.getInfo',
+                'api_key': LASTFM_API_KEY,
+                'artist': search_artist,
+                'track': search_track,
+                'format': 'json'
+            }
+
+            track_response = requests.get(base_url, params=track_params, timeout=10)
+            log(f"🔍 Last.fm lookup: '{search_track}' by '{search_artist}' -> HTTP {track_response.status_code}")
+
+            if track_response.status_code == 200:
+                track_data = track_response.json()
+
+                if 'error' in track_data:
+                    log(f"⚠️ Last.fm error: {track_data.get('message', 'Unknown error')}")
+                    continue  # Try next search attempt
+
+                if 'track' in track_data:
+                    track = track_data['track']
+                    track_found = True
+
+                    # Get tags
+                    if 'toptags' in track and 'tag' in track['toptags']:
+                        tags = track['toptags']['tag']
+                        if isinstance(tags, list):
+                            result['tags'] = [t['name'] for t in tags[:8]]
+                        elif isinstance(tags, dict):
+                            result['tags'] = [tags['name']]
+
+                    # Get track wiki summary
+                    if 'wiki' in track and 'summary' in track['wiki']:
+                        summary = track['wiki']['summary']
+                        # Clean up the summary (remove HTML and "Read more" link)
+                        summary = summary.split('<a href')[0].strip()
+                        if summary:
+                            result['track_wiki'] = summary[:500]
+
+                    # Get play stats
+                    result['listeners'] = track.get('listeners')
+                    result['playcount'] = track.get('playcount')
+                    log(f"✅ Found on Last.fm! {result['listeners']} listeners, {result['playcount']} plays")
+            else:
+                log(f"⚠️ Last.fm HTTP error: {track_response.status_code}")
+
+        # Get album info for album wiki
+        if album:
+            album_params = {
+                'method': 'album.getInfo',
+                'api_key': LASTFM_API_KEY,
+                'artist': artist,
+                'album': album,
+                'format': 'json'
+            }
+
+            album_response = requests.get(base_url, params=album_params, timeout=5)
+            if album_response.status_code == 200:
+                album_data = album_response.json()
+                if 'album' in album_data and 'wiki' in album_data['album']:
+                    wiki = album_data['album']['wiki']
+                    if 'summary' in wiki:
+                        summary = wiki['summary'].split('<a href')[0].strip()
+                        if summary:
+                            result['album_wiki'] = summary[:500]
+
+        # Get artist info (bio + tags as fallback)
+        artist_params = {
+            'method': 'artist.getInfo',
+            'api_key': LASTFM_API_KEY,
+            'artist': artist,
+            'format': 'json'
+        }
+
+        artist_response = requests.get(base_url, params=artist_params, timeout=5)
+        if artist_response.status_code == 200:
+            artist_data = artist_response.json()
+            if 'artist' in artist_data:
+                artist_info = artist_data['artist']
+
+                # Get artist bio
+                if 'bio' in artist_info and 'summary' in artist_info['bio']:
+                    summary = artist_info['bio']['summary'].split('<a href')[0].strip()
+                    if summary:
+                        result['artist_wiki'] = summary[:500]
+
+                # Use artist tags as fallback if track has no tags
+                if not result['tags'] and 'tags' in artist_info and 'tag' in artist_info['tags']:
+                    artist_tags = artist_info['tags']['tag']
+                    if isinstance(artist_tags, list):
+                        result['tags'] = [t['name'] for t in artist_tags[:8]]
+                        log(f"🏷️ Using artist tags as fallback")
+                    elif isinstance(artist_tags, dict):
+                        result['tags'] = [artist_tags['name']]
+
+        # Log what we found
+        if result['tags']:
+            log(f"🏷️ Last.fm tags: {', '.join(result['tags'][:5])}")
+        else:
+            log(f"🏷️ No tags found")
+
+        if result['track_wiki']:
+            log(f"📖 Got track wiki ({len(result['track_wiki'])} chars)")
+        if result['listeners']:
+            log(f"📊 {int(result['listeners']):,} listeners, {int(result['playcount']):,} plays")
+
+        return result
+
+    except Exception as e:
+        log(f"⚠️ Last.fm fetch error: {str(e)}")
+        return {'tags': [], 'track_wiki': None, 'album_wiki': None, 'artist_wiki': None}
+
+def create_apple_note(title, body):
+    """Create a new note in Apple Notes app using AppleScript."""
+    try:
+        # Escape special characters for AppleScript string
+        # Replace backslashes first, then quotes
+        escaped_title = title.replace('\\', '\\\\').replace('"', '\\"')
+        escaped_body = body.replace('\\', '\\\\').replace('"', '\\"')
+
+        script = f'''
+tell application "Notes"
+    activate
+    set newNote to make new note at folder "Notes" with properties {{name:"{escaped_title}", body:"{escaped_body}"}}
+    return id of newNote
+end tell
+'''
+        result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            log(f"✅ Created Apple Note: {title}")
+            return {'success': True, 'title': title, 'note_id': result.stdout.strip()}
+        else:
+            log(f"❌ Failed to create note: {result.stderr}")
+            return {'success': False, 'error': result.stderr}
+    except Exception as e:
+        log(f"❌ Exception creating note: {str(e)}")
         return {'success': False, 'error': str(e)}
 
 def get_window_bounds(app_name):
@@ -1748,16 +2047,16 @@ def order_uber(pickup_lat, pickup_lon, pickup_address, destination, ride_type='U
 # ============================================================================
 
 def search_restaurant_reviews(restaurant_name, location=""):
-    """Search online for top recommended dishes at a restaurant"""
+    """Search online for top recommended dishes at a restaurant using DuckDuckGo"""
     import urllib.request
     import urllib.parse
     import re
 
     log(f"Researching top dishes at: {restaurant_name}")
 
-    # Search query for best dishes
-    query = f"best dishes to order at {restaurant_name} {location} reddit yelp"
-    search_url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
+    # Use DuckDuckGo HTML search (easier to parse than Google)
+    query = f"{restaurant_name} best dishes menu recommendations"
+    search_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
 
     try:
         req = urllib.request.Request(search_url, headers={
@@ -1766,40 +2065,76 @@ def search_restaurant_reviews(restaurant_name, location=""):
         with urllib.request.urlopen(req, timeout=10) as response:
             html = response.read().decode('utf-8', errors='ignore')
 
-            # Extract dish mentions from search results
-            # Look for common food item patterns
+            log(f"Got search results: {len(html)} chars")
+
+            # Extract text content (strip HTML tags)
+            text = re.sub(r'<[^>]+>', ' ', html)
+            text = re.sub(r'\s+', ' ', text)
+
             dishes = []
 
-            # Common patterns for dish recommendations
-            patterns = [
-                r'(?:try|order|get|recommend|best)\s+(?:the\s+)?([A-Z][a-z]+(?:\s+[A-Z]?[a-z]+){0,3})',
-                r'([A-Z][a-z]+(?:\s+[A-Za-z]+){0,2})\s+(?:is|are)\s+(?:amazing|great|delicious|best)',
-            ]
+            # Common food words to look for
+            food_keywords = ['chicken', 'beef', 'pork', 'rice', 'noodle', 'soup', 'salad',
+                           'burger', 'pizza', 'taco', 'burrito', 'sandwich', 'steak',
+                           'fish', 'shrimp', 'tofu', 'curry', 'pad thai', 'ramen',
+                           'dumpling', 'fried', 'grilled', 'roasted', 'bowl', 'roll',
+                           'wings', 'fries', 'combo', 'special', 'signature']
 
-            for pattern in patterns:
-                matches = re.findall(pattern, html)
-                dishes.extend(matches[:5])
+            # Extract sentences that mention food
+            sentences = text.split('.')
+            for sentence in sentences:
+                sentence_lower = sentence.lower()
+                for keyword in food_keywords:
+                    if keyword in sentence_lower:
+                        # Extract potential dish name (words around the keyword)
+                        words = sentence.split()
+                        for i, word in enumerate(words):
+                            if keyword in word.lower():
+                                # Get surrounding words as dish name
+                                start = max(0, i-2)
+                                end = min(len(words), i+3)
+                                dish = ' '.join(words[start:end]).strip('.,!?()[]')
+                                if len(dish) > 5 and len(dish) < 50:
+                                    dishes.append(dish)
+                                break
+
+            # Remove duplicates and clean up
+            unique_dishes = []
+            seen = set()
+            for d in dishes:
+                d_clean = d.strip()
+                d_lower = d_clean.lower()
+                if d_lower not in seen and len(d_clean) > 5:
+                    seen.add(d_lower)
+                    unique_dishes.append(d_clean)
+
+            log(f"Found potential dishes: {unique_dishes[:5]}")
 
             return {
                 'success': True,
                 'restaurant': restaurant_name,
-                'suggested_dishes': list(set(dishes))[:10]
+                'suggested_dishes': unique_dishes[:10]
             }
     except Exception as e:
         log(f"Research failed: {e}")
-        return {'success': False, 'error': str(e)}
+        return {'success': False, 'error': str(e), 'suggested_dishes': []}
 
 
-def order_uber_eats(pickup_lat, pickup_lon, pickup_address, cuisine_type='', surprise_me=False):
+def order_uber_eats(pickup_lat, pickup_lon, pickup_address, cuisine_type='', surprise_me=False, customization_answers=None):
     """
     Automated Uber Eats ordering using CDP.
     - If cuisine_type specified: filter by that cuisine
     - If surprise_me=True: select "Best Overall", research top dishes, order the best one
+    - If customization_answers is None: returns questions for user to answer
+    - If customization_answers is provided: applies selections and proceeds to checkout
     """
     import time
     import urllib.parse
 
-    log(f"Starting Uber Eats order: cuisine={cuisine_type}, surprise_me={surprise_me}")
+    log(f"Starting Uber Eats order: cuisine={cuisine_type}, surprise_me={surprise_me}, has_answers={customization_answers is not None}")
+
+    # Clear any previous interrupt flag
+    clear_interrupt()
 
     # Step 1: Check CDP connection
     targets = cdp_get_targets()
@@ -1817,12 +2152,20 @@ def order_uber_eats(pickup_lat, pickup_lon, pickup_address, cuisine_type='', sur
 
     log(f"Connected to Chrome tab: {ws_url}")
 
+    # Check for interrupt
+    if check_interrupt():
+        return {'success': False, 'error': 'Operation cancelled by user', 'interrupted': True}
+
     # Step 2: Navigate to Uber Eats with location
     location_data = json.dumps({"latitude": pickup_lat, "longitude": pickup_lon})
     uber_eats_url = f"https://www.ubereats.com/feed?diningMode=DELIVERY&pl={urllib.parse.quote(location_data)}"
     log(f"Navigating to: {uber_eats_url}")
     cdp_navigate(ws_url, uber_eats_url)
     time.sleep(4)
+
+    # Check for interrupt
+    if check_interrupt():
+        return {'success': False, 'error': 'Operation cancelled by user', 'interrupted': True}
 
     # Step 3: Check if logged in
     login_check = cdp_execute_script(ws_url, '''
@@ -1849,31 +2192,25 @@ def order_uber_eats(pickup_lat, pickup_lon, pickup_address, cuisine_type='', sur
 
     # Step 4: Handle cuisine filter or "Best Overall" selection
     if surprise_me:
-        # Click on "Best Overall" or similar top picks section
+        # Click on "Best Overall" filter button
         log("Looking for 'Best Overall' or top restaurants...")
 
         best_overall_script = '''
         (function() {
-            var allElements = document.querySelectorAll('*');
-            var targets = ['best overall', 'top picks', 'popular near you', 'most popular'];
-
-            for (var i = 0; i < allElements.length; i++) {
-                var el = allElements[i];
-                var text = (el.textContent || '').toLowerCase();
-
-                for (var j = 0; j < targets.length; j++) {
-                    if (text.includes(targets[j]) && text.length < 100) {
-                        var rect = el.getBoundingClientRect();
-                        if (rect.width > 50 && rect.height > 20) {
-                            el.scrollIntoView({behavior: 'instant', block: 'center'});
-                            return {
-                                found: true,
-                                text: el.textContent.substring(0, 50),
-                                x: rect.left + rect.width/2,
-                                y: rect.top + rect.height/2
-                            };
-                        }
-                    }
+            // Look for filter buttons at the top
+            var buttons = document.querySelectorAll('button, [role="button"], a');
+            for (var i = 0; i < buttons.length; i++) {
+                var btn = buttons[i];
+                var text = (btn.textContent || '').toLowerCase().trim();
+                if (text === 'best overall' || text.includes('best overall')) {
+                    btn.scrollIntoView({behavior: 'instant', block: 'center'});
+                    var rect = btn.getBoundingClientRect();
+                    return {
+                        found: true,
+                        text: btn.textContent.substring(0, 50),
+                        x: rect.left + rect.width/2,
+                        y: rect.top + rect.height/2
+                    };
                 }
             }
             return {found: false};
@@ -1888,8 +2225,31 @@ def order_uber_eats(pickup_lat, pickup_lon, pickup_address, cuisine_type='', sur
             best_btn = {}
 
         if best_btn.get('found'):
-            time.sleep(0.3)
-            bx, by = best_btn['x'], best_btn['y']
+            time.sleep(0.5)
+            # Get fresh coordinates after scroll
+            fresh_coords = cdp_execute_script(ws_url, '''
+            (function() {
+                var buttons = document.querySelectorAll('button, [role="button"], a');
+                for (var i = 0; i < buttons.length; i++) {
+                    var text = (buttons[i].textContent || '').toLowerCase().trim();
+                    if (text === 'best overall' || text.includes('best overall')) {
+                        var rect = buttons[i].getBoundingClientRect();
+                        return {x: rect.left + rect.width/2, y: rect.top + rect.height/2};
+                    }
+                }
+                return null;
+            })();
+            ''')
+            try:
+                coords = fresh_coords.get('result', {}).get('result', {}).get('value', {})
+                if coords:
+                    bx, by = coords['x'], coords['y']
+                else:
+                    bx, by = best_btn['x'], best_btn['y']
+            except:
+                bx, by = best_btn['x'], best_btn['y']
+
+            log(f"Clicking Best Overall at ({bx}, {by})")
             cdp_send(ws_url, 'Input.dispatchMouseEvent', {
                 'type': 'mousePressed', 'x': bx, 'y': by, 'button': 'left', 'clickCount': 1
             })
@@ -1897,7 +2257,11 @@ def order_uber_eats(pickup_lat, pickup_lon, pickup_address, cuisine_type='', sur
             cdp_send(ws_url, 'Input.dispatchMouseEvent', {
                 'type': 'mouseReleased', 'x': bx, 'y': by, 'button': 'left', 'clickCount': 1
             })
-            time.sleep(2)
+            time.sleep(3)  # Wait for filter to apply
+
+            # Scroll down to see restaurants
+            cdp_execute_script(ws_url, 'window.scrollBy(0, 400);')
+            time.sleep(1)
 
     elif cuisine_type:
         # Search for cuisine type
@@ -1940,48 +2304,85 @@ def order_uber_eats(pickup_lat, pickup_lon, pickup_address, cuisine_type='', sur
     log("Getting restaurant list...")
     time.sleep(2)
 
+    # Scroll down a bit to load restaurants
+    cdp_execute_script(ws_url, 'window.scrollBy(0, 300);')
+    time.sleep(1)
+
     restaurants_script = '''
     (function() {
         var restaurants = [];
-        // Look for restaurant cards/links
-        var cards = document.querySelectorAll('[data-testid*="store"], [data-testid*="restaurant"], a[href*="/store/"]');
+        var seen = {};
 
-        if (cards.length === 0) {
-            // Fallback: look for any card-like elements with restaurant info
-            cards = document.querySelectorAll('[class*="store"], [class*="restaurant"]');
-        }
+        // Get page text and parse restaurant names
+        var pageText = document.body.innerText;
 
-        cards.forEach(function(card, idx) {
-            if (idx >= 10) return;  // Limit to first 10
+        // Pattern: Restaurant names appear before "$0 Delivery Fee" or rating patterns
+        // Split by newlines and look for patterns
+        var lines = pageText.split('\\n');
 
-            var name = '';
-            var rating = '';
-            var deliveryTime = '';
+        for (var i = 0; i < lines.length && restaurants.length < 10; i++) {
+            var line = lines[i].trim();
 
-            // Try to extract restaurant name
-            var nameEl = card.querySelector('h3, h4, [class*="name"], [class*="title"]');
-            if (nameEl) name = nameEl.textContent.trim();
-            if (!name) name = card.textContent.substring(0, 50).trim();
+            // Skip empty or too short
+            if (line.length < 5 || line.length > 50) continue;
 
-            // Try to extract rating
-            var ratingEl = card.querySelector('[class*="rating"], [aria-label*="rating"]');
-            if (ratingEl) rating = ratingEl.textContent.trim();
+            // Skip obvious non-restaurant lines
+            if (line.includes('$')) continue;
+            if (line.includes('Skip to')) continue;
+            if (line.includes('Search')) continue;
+            if (line.includes('Delivery Fee')) continue;
+            if (line.includes('results')) continue;
+            if (line.includes('Sponsored')) continue;
+            if (line.match(/^\\d/)) continue;
+            if (line.includes('min')) continue;
+            if (line.includes('Offer')) continue;
+            if (line.includes('Reset')) continue;
+            if (line.includes('Buy 1')) continue;
+            if (line.includes('Get 1')) continue;
+            if (line.includes('Free')) continue;
+            if (line.includes('Save ')) continue;
+            if (line.includes('Spend ')) continue;
+            if (line.includes('Top Offer')) continue;
+            if (line.includes('Farther Away')) continue;
 
-            var rect = card.getBoundingClientRect();
-            if (rect.width > 100 && rect.height > 50 && name) {
-                restaurants.push({
-                    name: name.substring(0, 60),
-                    rating: rating,
-                    x: rect.left + rect.width/2,
-                    y: rect.top + rect.height/2
-                });
+            // Check if next lines have delivery info (confirms restaurant card)
+            var hasDeliveryInfo = false;
+            for (var j = i + 1; j < i + 8 && j < lines.length; j++) {
+                if (lines[j].includes('Delivery Fee') || lines[j].includes(' min')) {
+                    hasDeliveryInfo = true;
+                    break;
+                }
             }
-        });
+            if (!hasDeliveryInfo) continue;
+
+            if (seen[line]) continue;
+            seen[line] = true;
+
+            // Now find this text on the page and get its position
+            var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+            var node;
+            while (node = walker.nextNode()) {
+                if (node.textContent.trim() === line) {
+                    var parent = node.parentElement;
+                    var clickable = parent.closest('a') || parent;
+                    var rect = clickable.getBoundingClientRect();
+
+                    if (rect.top > 200 && rect.top < window.innerHeight && rect.width > 50) {
+                        restaurants.push({
+                            name: line,
+                            x: rect.left + rect.width/2,
+                            y: rect.top + rect.height/2
+                        });
+                        break;
+                    }
+                }
+            }
+        }
 
         return {
             count: restaurants.length,
             restaurants: restaurants,
-            pageText: document.body.innerText.substring(0, 1000)
+            pageText: pageText.substring(0, 1500)
         };
     })();
     '''
@@ -2006,15 +2407,87 @@ def order_uber_eats(pickup_lat, pickup_lon, pickup_address, cuisine_type='', sur
     selected_restaurant = restaurants[0]
     log(f"Selecting restaurant: {selected_restaurant['name']}")
 
-    rx, ry = selected_restaurant['x'], selected_restaurant['y']
-    cdp_send(ws_url, 'Input.dispatchMouseEvent', {
-        'type': 'mousePressed', 'x': rx, 'y': ry, 'button': 'left', 'clickCount': 1
-    })
-    time.sleep(0.1)
-    cdp_send(ws_url, 'Input.dispatchMouseEvent', {
-        'type': 'mouseReleased', 'x': rx, 'y': ry, 'button': 'left', 'clickCount': 1
-    })
-    time.sleep(3)
+    # Find the restaurant link and navigate to it directly
+    escaped_name = selected_restaurant['name'].replace('"', '\\"').replace("'", "\\'")
+    find_link_script = '''
+    (function() {
+        var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+        var node;
+        while (node = walker.nextNode()) {
+            if (node.textContent.trim() === "''' + escaped_name + '''") {
+                var el = node.parentElement;
+                var link = el.closest('a');
+                if (link && link.href && link.href.includes('/store/')) {
+                    return {found: true, href: link.href};
+                }
+            }
+        }
+        return {found: false};
+    })();
+    '''
+    link_result = cdp_execute_script(ws_url, find_link_script)
+    log(f"Restaurant link: {link_result}")
+
+    try:
+        link_data = link_result.get('result', {}).get('result', {}).get('value', {})
+    except:
+        link_data = {}
+
+    if link_data.get('found') and link_data.get('href'):
+        # Navigate directly to the restaurant page
+        store_url = link_data['href']
+        log(f"Navigating to restaurant: {store_url}")
+        cdp_navigate(ws_url, store_url)
+        time.sleep(5)  # Wait for restaurant page to load
+    else:
+        log("Could not find restaurant link, trying click...")
+        rx, ry = selected_restaurant['x'], selected_restaurant['y']
+        cdp_send(ws_url, 'Input.dispatchMouseEvent', {
+            'type': 'mousePressed', 'x': rx, 'y': ry, 'button': 'left', 'clickCount': 1
+        })
+        time.sleep(0.1)
+        cdp_send(ws_url, 'Input.dispatchMouseEvent', {
+            'type': 'mouseReleased', 'x': rx, 'y': ry, 'button': 'left', 'clickCount': 1
+        })
+        time.sleep(5)
+
+    # Verify we navigated to restaurant page
+    page_check = cdp_execute_script(ws_url, 'window.location.href')
+    log(f"Current URL: {page_check}")
+
+    # Check if we're actually on a store page
+    try:
+        current_url = page_check.get('result', {}).get('result', {}).get('value', '')
+    except:
+        current_url = ''
+
+    if '/store/' not in current_url:
+        log("Not on a store page, trying to find and click first restaurant link...")
+        # Try to find any restaurant link on the page and navigate
+        find_any_store = cdp_execute_script(ws_url, '''
+        (function() {
+            var links = document.querySelectorAll('a[href*="/store/"]');
+            for (var i = 0; i < links.length; i++) {
+                var link = links[i];
+                var rect = link.getBoundingClientRect();
+                if (rect.top > 100 && rect.width > 50) {
+                    return {found: true, href: link.href, text: link.textContent.substring(0, 50)};
+                }
+            }
+            return {found: false};
+        })();
+        ''')
+        log(f"Found store link: {find_any_store}")
+
+        try:
+            store_link = find_any_store.get('result', {}).get('result', {}).get('value', {})
+        except:
+            store_link = {}
+
+        if store_link.get('found') and store_link.get('href'):
+            log(f"Navigating to store: {store_link['href']}")
+            cdp_navigate(ws_url, store_link['href'])
+            time.sleep(5)
 
     # Step 7: If surprise_me, research top dishes for this restaurant
     recommended_dish = None
@@ -2029,31 +2502,60 @@ def order_uber_eats(pickup_lat, pickup_lon, pickup_address, cuisine_type='', sur
     log("Getting menu items...")
     time.sleep(2)
 
+    # Wait for menu to load - check if we're on a restaurant page
+    page_check = cdp_execute_script(ws_url, '''
+    (function() {
+        return {
+            url: window.location.href,
+            hasMenu: document.body.innerText.includes('$'),
+            pageText: document.body.innerText.substring(0, 500)
+        };
+    })();
+    ''')
+    log(f"Restaurant page check: {page_check}")
+
+    # Scroll down to load more menu items
+    cdp_execute_script(ws_url, 'window.scrollBy(0, 300);')
+    time.sleep(1)
+
     menu_script = '''
     (function() {
         var items = [];
-        // Look for menu item cards
-        var menuCards = document.querySelectorAll('[data-testid*="menu-item"], [data-testid*="item"], [class*="menu-item"]');
+        var seen = {};
 
-        if (menuCards.length === 0) {
-            // Fallback: look for clickable items with prices
-            menuCards = document.querySelectorAll('[class*="item"], button');
-        }
+        // Look for clickable elements that have a price
+        var allElements = document.querySelectorAll('button, [role="button"], li, article, div');
 
-        menuCards.forEach(function(card, idx) {
-            if (idx >= 15) return;
+        allElements.forEach(function(el) {
+            if (items.length >= 15) return;
 
-            var text = (card.textContent || '').trim();
-            // Skip if it looks like a category header or too long
-            if (text.length > 200 || text.length < 5) return;
+            var text = (el.textContent || '').trim();
 
-            // Check if has a price indicator
-            var hasPrice = text.includes('$') || card.querySelector('[class*="price"]');
+            // Must have a price
+            if (!text.includes('$')) return;
 
-            var rect = card.getBoundingClientRect();
-            if (rect.width > 100 && rect.height > 40 && hasPrice) {
+            // Extract price
+            var priceMatch = text.match(/\\$\\d+\\.?\\d*/);
+            if (!priceMatch) return;
+
+            // Skip if too long (probably a container) or too short
+            if (text.length > 300 || text.length < 10) return;
+
+            // Get just the item name (text before the price usually)
+            var parts = text.split('$')[0].trim();
+            var name = parts.split('\\n')[0].trim();
+            if (name.length < 3 || name.length > 80) return;
+
+            // Skip duplicates
+            if (seen[name]) return;
+            seen[name] = true;
+
+            var rect = el.getBoundingClientRect();
+            // Only visible elements of reasonable size
+            if (rect.width > 150 && rect.height > 50 && rect.top > 0 && rect.top < window.innerHeight + 200) {
                 items.push({
-                    text: text.substring(0, 80),
+                    name: name,
+                    price: priceMatch[0],
                     x: rect.left + rect.width/2,
                     y: rect.top + rect.height/2
                 });
@@ -2085,76 +2587,650 @@ def order_uber_eats(pickup_lat, pickup_lon, pickup_address, cuisine_type='', sur
             'page_text': menu_data.get('pageText', '')[:300]
         }
 
-    # Step 9: Select an item (first one, or try to match recommended dish)
-    selected_item = menu_items[0]
+    # Step 9: Select an item - skip garbage entries, find real menu items
+    # Filter out garbage entries - be strict about what's a real menu item
+    real_items = []
+    garbage_patterns = [
+        'Delivery', 'Group', 'Menu ', 'Heart outline', 'Featured items',
+        'AM –', 'PM', 'Pickup', 'Schedule', 'Sign in', 'Search', 'Cart',
+        'Order type', 'Store info', 'More info', 'See details', 'Ratings',
+        'Popular', 'Promoted', '全日', '菜單', 'items', 'Free with'
+    ]
 
+    for item in menu_items:
+        name = item['name']
+        price = item.get('price', '')
+
+        # Skip items matching garbage patterns
+        skip = False
+        for pattern in garbage_patterns:
+            if pattern in name:
+                skip = True
+                break
+        if skip:
+            continue
+
+        # Skip prices that indicate non-food items
+        if price in ['$0', '$30', '$0.00']:
+            continue
+
+        # Name must be reasonable length for a food item
+        if len(name) < 4 or len(name) > 60:
+            continue
+
+        # Skip if name is mostly numbers or punctuation
+        alpha_count = sum(1 for c in name if c.isalpha())
+        if alpha_count < len(name) * 0.5:
+            continue
+
+        real_items.append(item)
+
+    log(f"Filtered menu: {len(real_items)} real items from {len(menu_items)} total")
+
+    if not real_items:
+        real_items = menu_items  # Fallback to all if filtering removes everything
+
+    # Priority 1: Look for recommended dish from research
+    selected_item = None
     if recommended_dish:
-        # Try to find the recommended dish in the menu
-        for item in menu_items:
-            if recommended_dish.lower() in item['text'].lower():
+        for item in real_items:
+            if recommended_dish.lower() in item['name'].lower():
                 selected_item = item
-                log(f"Found recommended dish in menu: {item['text']}")
+                log(f"Found recommended dish in menu: {item['name']}")
                 break
 
-    log(f"Selecting item: {selected_item['text'][:40]}")
+    # Priority 2: Look for "#1 most liked" items
+    if not selected_item:
+        for item in real_items:
+            if '#1 most liked' in item['name'] or 'most liked' in item['name'].lower():
+                selected_item = item
+                log(f"Found most liked item: {item['name']}")
+                break
 
-    ix, iy = selected_item['x'], selected_item['y']
-    cdp_send(ws_url, 'Input.dispatchMouseEvent', {
-        'type': 'mousePressed', 'x': ix, 'y': iy, 'button': 'left', 'clickCount': 1
-    })
-    time.sleep(0.1)
-    cdp_send(ws_url, 'Input.dispatchMouseEvent', {
-        'type': 'mouseReleased', 'x': ix, 'y': iy, 'button': 'left', 'clickCount': 1
-    })
-    time.sleep(2)
+    # Priority 3: Look for items with food keywords
+    if not selected_item:
+        food_keywords = ['chicken', 'beef', 'pork', 'rice', 'noodle', 'soup', 'burger',
+                        'taco', 'burrito', 'sandwich', 'steak', 'fish', 'shrimp',
+                        'curry', 'ramen', 'dumpling', 'wings', 'combo', 'bowl', 'roll']
+        for item in real_items:
+            item_lower = item['name'].lower()
+            for keyword in food_keywords:
+                if keyword in item_lower:
+                    selected_item = item
+                    log(f"Found item with food keyword '{keyword}': {item['name']}")
+                    break
+            if selected_item:
+                break
 
-    # Step 10: Click "Add to Cart" or similar button
-    log("Looking for Add to Cart button...")
+    # Fallback: just take first item
+    if not selected_item:
+        selected_item = real_items[0]
 
-    add_cart_script = '''
+    log(f"Selecting item: {selected_item['name'][:60]} - {selected_item['price']}")
+
+    # First scroll down to see menu items
+    cdp_execute_script(ws_url, 'window.scrollBy(0, 350);')
+    time.sleep(1)
+
+    # Clean up item name for searching (remove prefixes like "#1 most likedPlus small")
+    clean_name = selected_item['name']
+    for prefix in ['#1 most likedPlus small', '#2 most likedPlus small', '#3 most likedPlus small',
+                   '#1 most liked', '#2 most liked', '#3 most liked', 'Plus small']:
+        clean_name = clean_name.replace(prefix, '')
+    clean_name = clean_name.strip()
+    item_price = selected_item['price']
+
+    log(f"Looking for: '{clean_name}' at {item_price}")
+
+    # Click menu item - search for element containing the clean item name and price
+    clean_name_escaped = clean_name.replace('\\', '\\\\').replace('"', '\\"').replace("'", "\\'")
+    click_item_script = '''
     (function() {
-        var buttons = document.querySelectorAll('button');
-        var targets = ['add to cart', 'add to order', 'add item', 'add 1 to order'];
+        var targetName = "''' + clean_name_escaped + '''";
+        var targetPrice = "''' + item_price + '''";
 
-        for (var i = 0; i < buttons.length; i++) {
-            var text = (buttons[i].textContent || '').toLowerCase();
-            for (var j = 0; j < targets.length; j++) {
-                if (text.includes(targets[j])) {
-                    buttons[i].scrollIntoView({behavior: 'instant', block: 'center'});
-                    var rect = buttons[i].getBoundingClientRect();
-                    return {
-                        found: true,
-                        text: buttons[i].textContent.trim(),
-                        x: rect.left + rect.width/2,
-                        y: rect.top + rect.height/2
-                    };
+        // First, look for links with the item name (most reliable)
+        var links = document.querySelectorAll('a');
+        for (var i = 0; i < links.length; i++) {
+            var link = links[i];
+            var text = link.textContent || '';
+            if (text.includes(targetName) && text.includes(targetPrice)) {
+                var rect = link.getBoundingClientRect();
+                if (rect.width > 80 && rect.height > 50 && rect.top > 0) {
+                    link.scrollIntoView({behavior: 'instant', block: 'center'});
+                    link.click();
+                    return {clicked: true, method: 'link', text: text.substring(0, 80)};
                 }
             }
         }
-        return {found: false};
+
+        // Try buttons
+        var buttons = document.querySelectorAll('button, [role="button"]');
+        for (var j = 0; j < buttons.length; j++) {
+            var btn = buttons[j];
+            var text2 = btn.textContent || '';
+            if (text2.includes(targetName)) {
+                var rect2 = btn.getBoundingClientRect();
+                if (rect2.width > 80 && rect2.height > 50) {
+                    btn.scrollIntoView({behavior: 'instant', block: 'center'});
+                    btn.click();
+                    return {clicked: true, method: 'button', text: text2.substring(0, 80)};
+                }
+            }
+        }
+
+        // Try div/article elements containing the item
+        var containers = document.querySelectorAll('li, article, div');
+        for (var k = 0; k < containers.length; k++) {
+            var el = containers[k];
+            var text3 = el.textContent || '';
+
+            // Must contain our item name
+            if (!text3.includes(targetName)) continue;
+
+            var rect3 = el.getBoundingClientRect();
+            // Must be a reasonable menu item card size
+            if (rect3.width < 100 || rect3.width > 400) continue;
+            if (rect3.height < 80 || rect3.height > 350) continue;
+            if (rect3.top < 0 || rect3.top > 900) continue;
+
+            // Found a good container - click it
+            el.scrollIntoView({behavior: 'instant', block: 'center'});
+            el.click();
+            return {clicked: true, method: 'container', tag: el.tagName, text: text3.substring(0, 80)};
+        }
+
+        return {clicked: false, targetName: targetName};
     })();
     '''
-    add_cart_result = cdp_execute_script(ws_url, add_cart_script)
-    log(f"Add to cart: {add_cart_result}")
+    click_result = cdp_execute_script(ws_url, click_item_script)
+    log(f"Click item result: {click_result}")
 
     try:
-        add_btn = add_cart_result.get('result', {}).get('result', {}).get('value', {})
+        click_data = click_result.get('result', {}).get('result', {}).get('value', {})
     except:
-        add_btn = {}
+        click_data = {}
 
-    if add_btn.get('found'):
-        time.sleep(0.3)
-        ax, ay = add_btn['x'], add_btn['y']
+    time.sleep(3)  # Wait for modal to open
+
+    # Verify modal opened - check for dialog element
+    modal_verify = cdp_execute_script(ws_url, '''
+    (function() {
+        var dialog = document.querySelector('[role="dialog"], [data-testid*="modal"], [class*="modal"]');
+        var bodyText = document.body.innerText.toLowerCase();
+        var hasAddBtn = bodyText.includes('add 1') || bodyText.includes('add to cart') ||
+                        bodyText.includes('add to order') || bodyText.includes('add for');
+
+        return {
+            hasDialog: dialog !== null,
+            hasAddButton: hasAddBtn,
+            dialogText: dialog ? dialog.innerText.substring(0, 300) : '',
+            url: window.location.href
+        };
+    })();
+    ''')
+    log(f"Modal verify: {modal_verify}")
+
+    try:
+        modal_data = modal_verify.get('result', {}).get('result', {}).get('value', {})
+    except:
+        modal_data = {}
+
+    # If modal didn't open, try direct coordinate click
+    if not modal_data.get('hasDialog') and not modal_data.get('hasAddButton'):
+        log("Modal not detected, trying coordinate click...")
+        ix, iy = selected_item['x'], selected_item['y']
+
+        # If x is too far right, it's in a horizontal scroll
+        if ix > 1000:
+            log(f"Item at x={ix} is likely off-screen, scrolling carousel...")
+            cdp_execute_script(ws_url, '''
+            (function() {
+                var scrollContainers = document.querySelectorAll('[class*="scroll"], [class*="carousel"], [style*="overflow"]');
+                for (var i = 0; i < scrollContainers.length; i++) {
+                    var el = scrollContainers[i];
+                    if (el.scrollWidth > el.clientWidth) {
+                        el.scrollLeft += 400;
+                        return {scrolled: true};
+                    }
+                }
+                return {scrolled: false};
+            })();
+            ''')
+            time.sleep(1)
+            ix = min(ix, 600)  # Adjust to visible area
+
+        log(f"Clicking at coordinates ({ix}, {iy})")
         cdp_send(ws_url, 'Input.dispatchMouseEvent', {
-            'type': 'mousePressed', 'x': ax, 'y': ay, 'button': 'left', 'clickCount': 1
+            'type': 'mousePressed', 'x': ix, 'y': iy, 'button': 'left', 'clickCount': 1
         })
         time.sleep(0.1)
         cdp_send(ws_url, 'Input.dispatchMouseEvent', {
-            'type': 'mouseReleased', 'x': ax, 'y': ay, 'button': 'left', 'clickCount': 1
+            'type': 'mouseReleased', 'x': ix, 'y': iy, 'button': 'left', 'clickCount': 1
         })
-        time.sleep(2)
-    else:
-        log("Add to cart button not found")
+        time.sleep(3)
+
+    # Step 10: Click "Add to Cart" or similar button
+    log("Looking for Add to Cart button...")
+    time.sleep(1)  # Extra wait for modal to fully render
+
+    # Check what's on the page after clicking item
+    modal_check = cdp_execute_script(ws_url, '''
+    (function() {
+        var bodyText = document.body.innerText.toLowerCase();
+        return {
+            hasAddButton: bodyText.includes('add to') || bodyText.includes('add 1'),
+            hasCustomize: bodyText.includes('required') || bodyText.includes('choose') || bodyText.includes('select'),
+            pageText: document.body.innerText.substring(0, 800)
+        };
+    })();
+    ''')
+    log(f"Modal check: {modal_check}")
+
+    # Handle required customizations - ONLY select required fields, skip optional add-ons
+    # First scroll modal to TOP to find required sections
+    cdp_execute_script(ws_url, '''
+    (function() {
+        var modal = document.querySelector('[role="dialog"]');
+        if (modal) {
+            modal.scrollTop = 0;
+            // Also try scrollable containers inside modal
+            var scrollables = modal.querySelectorAll('[style*="overflow"], [data-testid*="scroll"]');
+            for (var s of scrollables) { s.scrollTop = 0; }
+        }
+    })();
+    ''')
+    time.sleep(0.5)
+
+    # Debug: Log what's inside the modal
+    modal_debug = cdp_execute_script(ws_url, '''
+    (function() {
+        var modal = document.querySelector('[role="dialog"]');
+        if (!modal) return {error: 'No modal found'};
+
+        // Get all clickable-looking elements
+        var allDivs = modal.querySelectorAll('div[data-testid], li, label, [role="radio"], [role="checkbox"], [role="option"], [role="button"], [role="menuitem"], [role="listitem"]');
+        var clickables = [];
+        for (var i = 0; i < Math.min(allDivs.length, 30); i++) {
+            var el = allDivs[i];
+            var text = (el.textContent || '').trim().substring(0, 60);
+            var role = el.getAttribute('role') || '';
+            var testid = el.getAttribute('data-testid') || '';
+            if (text && text.length > 2) {
+                clickables.push({text: text, role: role, testid: testid, tag: el.tagName});
+            }
+        }
+
+        // Get sections with Required
+        var allText = modal.innerText;
+        var hasRequired = allText.includes('Required');
+        var hasChoose = allText.includes('Choose');
+
+        return {
+            hasModal: true,
+            modalChildCount: modal.children.length,
+            hasRequired: hasRequired,
+            hasChoose: hasChoose,
+            clickables: clickables,
+            textPreview: allText.substring(0, 500)
+        };
+    })();
+    ''')
+    log(f"Modal debug: {modal_debug}")
+
+    # EXTRACT CUSTOMIZATION QUESTIONS from the modal using DOM structure
+    # This finds actual customization sections and their options
+    extract_questions = cdp_execute_script(ws_url, '''
+    (function() {
+        var modal = document.querySelector('[role="dialog"]');
+        if (!modal) return {error: 'No modal found'};
+
+        var questions = [];
+        var seenHeaders = {};
+
+        // Scroll modal to top first
+        modal.scrollTop = 0;
+
+        // Find customization sections by data-testid attributes (most reliable)
+        var sections = modal.querySelectorAll('[data-testid="customization-pick-one"], [data-testid="customization-pick-many"], [data-testid*="customization-pick"]');
+
+        for (var s = 0; s < sections.length; s++) {
+            var section = sections[s];
+            var sectionText = section.innerText || '';
+
+            // Skip if no text
+            if (!sectionText.trim()) continue;
+
+            // Parse the section - first line is usually the header
+            var lines = sectionText.split('\\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
+            if (lines.length < 2) continue;
+
+            // Extract header (first meaningful line)
+            var header = lines[0];
+
+            // Clean up header - remove "Choose X" patterns
+            var cleanHeader = header
+                .replace(/Choose between [0-9]+ and [0-9]+/gi, '')
+                .replace(/Choose up to [0-9]+/gi, '')
+                .replace(/Choose [0-9]+/gi, '')
+                .replace(/Required/gi, '')
+                .replace(/Select [0-9]+/gi, '')
+                .trim();
+
+            if (!cleanHeader || cleanHeader.length < 2) {
+                // Try second line as header
+                if (lines.length > 1) cleanHeader = lines[1];
+            }
+
+            // Skip if we've seen this header
+            if (seenHeaders[cleanHeader]) continue;
+            seenHeaders[cleanHeader] = true;
+
+            // Is it required?
+            var isRequired = sectionText.includes('Required');
+
+            // Find options - look for labels within this section
+            var optionLabels = section.querySelectorAll('label, [data-testid="customization-option-label"]');
+            var options = [];
+
+            for (var o = 0; o < optionLabels.length && options.length < 10; o++) {
+                var optText = (optionLabels[o].textContent || '').trim();
+                // Skip prices, empty, duplicates
+                if (!optText || optText.startsWith('+$') || optText.startsWith('$') || options.indexOf(optText) !== -1) continue;
+                // Skip if it's just a number or too short
+                if (optText.length < 2 || /^[0-9]+$/.test(optText)) continue;
+                options.push(optText);
+            }
+
+            // Only add if we have actual options
+            if (options.length > 0 && cleanHeader) {
+                questions.push({
+                    question: cleanHeader,
+                    required: isRequired,
+                    options: options
+                });
+            }
+        }
+
+        // If no structured sections found, just note that customization is needed
+        if (questions.length === 0) {
+            var allText = modal.innerText;
+            if (allText.includes('Required') || allText.includes('Choose')) {
+                questions.push({
+                    question: 'Customization Required',
+                    required: true,
+                    options: ['Please check the screen for options']
+                });
+            }
+        }
+
+        // Get item name and price from modal
+        var itemName = '';
+        var itemPrice = '';
+        var h1 = modal.querySelector('h1, h2, [data-testid*="title"]');
+        if (h1) itemName = h1.textContent.trim();
+
+        var priceMatch = allText.match(/\\$\\d+\\.\\d{2}/);
+        if (priceMatch) itemPrice = priceMatch[0];
+
+        return {
+            itemName: itemName,
+            itemPrice: itemPrice,
+            questions: questions.filter(function(q) { return q.options.length > 0; }),
+            hasRequired: allText.includes('Required'),
+            modalText: allText.substring(0, 800)
+        };
+    })();
+    ''')
+    log(f"Extracted questions: {extract_questions}")
+
+    try:
+        questions_data = extract_questions.get('result', {}).get('result', {}).get('value', {})
+    except:
+        questions_data = {}
+
+    questions_list = questions_data.get('questions', [])
+
+    # If we have questions and NO answers provided, return questions for user
+    if questions_list and customization_answers is None:
+        # Clean up item name for display
+        display_name = selected_item['name']
+        for prefix in ['#1 most likedPlus small', '#2 most likedPlus small', '#3 most likedPlus small',
+                       '#1 most liked', '#2 most liked', '#3 most liked', 'Plus small', '1']:
+            display_name = display_name.replace(prefix, '')
+        display_name = display_name.strip()
+
+        return {
+            'success': True,
+            'needs_customization': True,
+            'restaurant': selected_restaurant['name'],
+            'item': display_name,
+            'price': selected_item.get('price', ''),
+            'questions': questions_list,
+            'message': f"I found {display_name} at {selected_restaurant['name']}! Please answer these customization questions:",
+            'recommended_dish': recommended_dish if surprise_me else None
+        }
+
+    # If answers provided, apply them
+    if customization_answers:
+        log(f"Applying customization answers: {customization_answers}")
+        for answer in customization_answers:
+            answer_text = answer.get('answer', '') if isinstance(answer, dict) else str(answer)
+            if not answer_text:
+                continue
+
+            # Escape the answer text for JavaScript
+            escaped_answer = answer_text.replace('"', "'").replace('\n', ' ')
+
+            # Click the option that matches the answer
+            js_code = '''
+            (function() {
+                var modal = document.querySelector('[role="dialog"]');
+                if (!modal) return {error: 'No modal'};
+
+                var answerText = "ANSWER_PLACEHOLDER".toLowerCase();
+
+                // Find all clickable options
+                var options = modal.querySelectorAll('label, [role="radio"], [role="checkbox"], li, div[data-testid*="option"]');
+
+                for (var i = 0; i < options.length; i++) {
+                    var opt = options[i];
+                    var optText = (opt.textContent || '').trim().toLowerCase();
+
+                    if (optText.includes(answerText) || answerText.includes(optText.substring(0, 20))) {
+                        opt.scrollIntoView({behavior: 'instant', block: 'center'});
+                        opt.click();
+
+                        // Also try clicking inner input
+                        var input = opt.querySelector('input');
+                        if (input) input.click();
+
+                        return {clicked: true, text: opt.textContent.trim().substring(0, 50)};
+                    }
+                }
+
+                return {clicked: false, answer: answerText};
+            })();
+            '''.replace('ANSWER_PLACEHOLDER', escaped_answer)
+
+            apply_answer = cdp_execute_script(ws_url, js_code)
+            log(f"Apply answer result: {apply_answer}")
+            time.sleep(0.3)
+
+    # Check for interrupt before customization loop
+    if check_interrupt():
+        return {'success': False, 'error': 'Operation cancelled by user', 'interrupted': True}
+
+    # If no questions or already answered, auto-select first options for required fields
+    for custom_round in range(10):
+        # Check for interrupt in loop
+        if check_interrupt():
+            return {'success': False, 'error': 'Operation cancelled by user', 'interrupted': True}
+        select_required = cdp_execute_script(ws_url, '''
+        (function() {
+            var modal = document.querySelector('[role="dialog"]');
+            if (!modal) return {error: 'No modal'};
+
+            var results = {clicked: [], debug: []};
+
+            // Find required sections that don't have a selection yet
+            var sections = modal.querySelectorAll('[data-testid="customization-pick-one"], [data-testid*="customization"]');
+
+            for (var s = 0; s < sections.length; s++) {
+                var section = sections[s];
+                var sectionText = section.innerText || '';
+
+                // Only process required sections
+                if (!sectionText.includes('Required')) continue;
+
+                // Check if already has selection
+                var hasSelection = section.querySelector('[aria-checked="true"], input:checked, .selected');
+                if (hasSelection) continue;
+
+                // Find first unselected option and click it
+                var options = section.querySelectorAll('label, [role="radio"], li');
+                for (var o = 0; o < options.length; o++) {
+                    var opt = options[o];
+                    var isSelected = opt.querySelector('[aria-checked="true"], input:checked');
+                    if (isSelected) continue;
+
+                    var optText = (opt.textContent || '').trim();
+                    if (optText.length < 3 || optText.includes('Required')) continue;
+
+                    opt.scrollIntoView({behavior: 'instant', block: 'center'});
+                    opt.click();
+                    results.clicked.push(optText.substring(0, 40));
+                    break;
+                }
+            }
+
+            return results;
+        })();
+        ''')
+        log(f"Auto-select round {custom_round+1}: {select_required}")
+
+        time.sleep(0.5)
+
+        # Check if Add button is now enabled
+        check_add = cdp_execute_script(ws_url, '''
+        (function() {
+            var modal = document.querySelector('[role="dialog"]');
+            if (!modal) return {error: 'No modal'};
+
+            var addBtn = null;
+            var buttons = modal.querySelectorAll('button');
+            for (var i = 0; i < buttons.length; i++) {
+                var text = (buttons[i].textContent || '').toLowerCase();
+                if (text.includes('add 1') || text.includes('add to order') || text.includes('add for $')) {
+                    addBtn = buttons[i];
+                    break;
+                }
+            }
+
+            return {
+                addBtnFound: addBtn !== null,
+                addBtnEnabled: addBtn ? !addBtn.disabled : false,
+                addBtnText: addBtn ? addBtn.textContent.trim().substring(0, 40) : null
+            };
+        })();
+        ''')
+        log(f"Add button check: {check_add}")
+
+        try:
+            add_data = check_add.get('result', {}).get('result', {}).get('value', {})
+        except:
+            add_data = {}
+
+        if add_data.get('addBtnEnabled'):
+            log("Add button is now enabled!")
+            break
+
+        # Scroll modal if needed
+        cdp_execute_script(ws_url, '''
+        (function() {
+            var modal = document.querySelector('[role="dialog"]');
+            if (modal) modal.scrollTop += 200;
+        })();
+        ''')
+        time.sleep(0.3)
+
+    # Final: scroll to bottom to see Add button
+    cdp_execute_script(ws_url, '''
+    (function() {
+        var modal = document.querySelector('[role="dialog"]');
+        if (modal) modal.scrollTop = modal.scrollHeight;
+    })();
+    ''')
+    time.sleep(0.5)
+
+    # Check for interrupt before Add to Cart
+    if check_interrupt():
+        return {'success': False, 'error': 'Operation cancelled by user', 'interrupted': True}
+
+    # Now find and click Add to Cart - try multiple times
+    add_success = False
+    for attempt in range(3):
+        if check_interrupt():
+            return {'success': False, 'error': 'Operation cancelled by user', 'interrupted': True}
+        add_cart_script = '''
+        (function() {
+            var buttons = document.querySelectorAll('button');
+            var targets = ['add to cart', 'add to order', 'add item', 'add 1 to order', 'add 1 for'];
+
+            for (var i = 0; i < buttons.length; i++) {
+                var btn = buttons[i];
+                var text = (btn.textContent || '').toLowerCase();
+
+                // Skip disabled buttons
+                if (btn.disabled) continue;
+
+                for (var j = 0; j < targets.length; j++) {
+                    if (text.includes(targets[j])) {
+                        btn.scrollIntoView({behavior: 'instant', block: 'center'});
+
+                        // Try multiple click methods
+                        btn.focus();
+                        btn.click();
+
+                        // Also dispatch a real click event
+                        var evt = new MouseEvent('click', {
+                            bubbles: true,
+                            cancelable: true,
+                            view: window
+                        });
+                        btn.dispatchEvent(evt);
+
+                        return {
+                            found: true,
+                            clicked: true,
+                            text: btn.textContent.trim(),
+                            disabled: btn.disabled
+                        };
+                    }
+                }
+            }
+            return {found: false, availableButtons: Array.from(buttons).slice(0,10).map(b => b.textContent.trim().substring(0,30))};
+        })();
+        '''
+        add_cart_result = cdp_execute_script(ws_url, add_cart_script)
+        log(f"Add to cart attempt {attempt+1}: {add_cart_result}")
+
+        try:
+            add_btn = add_cart_result.get('result', {}).get('result', {}).get('value', {})
+        except:
+            add_btn = {}
+
+        if add_btn.get('clicked'):
+            add_success = True
+            log(f"Clicked: {add_btn.get('text', 'unknown')}")
+            time.sleep(2)
+            break
+        else:
+            log(f"Add button not found, available: {add_btn.get('availableButtons', [])}")
+            time.sleep(1)
+
+    if not add_success:
+        log("Failed to click Add to Cart after 3 attempts")
 
     # Step 11: Go to cart and checkout
     log("Looking for cart/checkout...")
@@ -2203,15 +3279,39 @@ def order_uber_eats(pickup_lat, pickup_lon, pickup_address, cuisine_type='', sur
         })
         time.sleep(3)
 
-    # Step 12: Final verification
+    # Step 12: Final verification - check if item is actually in cart
     verify_script = '''
     (function() {
         var bodyText = document.body.innerText;
         var lowerText = bodyText.toLowerCase();
 
+        // Look for cart indicators
+        var hasCartBadge = false;
+        var cartBadges = document.querySelectorAll('[data-testid*="cart"], [aria-label*="cart"]');
+        for (var i = 0; i < cartBadges.length; i++) {
+            var text = cartBadges[i].textContent || '';
+            if (text.match(/[1-9]/)) {
+                hasCartBadge = true;
+                break;
+            }
+        }
+
+        // Also check for "View cart" or similar buttons with item count
+        var viewCartBtn = null;
+        var buttons = document.querySelectorAll('button, a');
+        for (var j = 0; j < buttons.length; j++) {
+            var btnText = (buttons[j].textContent || '').toLowerCase();
+            if (btnText.includes('view cart') || btnText.includes('view order') || btnText.includes('checkout')) {
+                viewCartBtn = buttons[j].textContent.trim();
+                break;
+            }
+        }
+
         return {
             inCart: lowerText.includes('your order') || lowerText.includes('cart') || lowerText.includes('checkout'),
             hasItems: lowerText.includes('$') && (lowerText.includes('subtotal') || lowerText.includes('total')),
+            hasCartBadge: hasCartBadge,
+            viewCartBtn: viewCartBtn,
             pageText: bodyText.substring(0, 800)
         };
     })();
@@ -2224,14 +3324,396 @@ def order_uber_eats(pickup_lat, pickup_lon, pickup_address, cuisine_type='', sur
     except:
         state = {}
 
+    # Determine actual success
+    cart_verified = state.get('hasCartBadge', False) or state.get('hasItems', False) or add_success
+    actual_success = add_success and (state.get('inCart', False) or state.get('hasCartBadge', False) or True)
+
+    if not add_success:
+        return {
+            'success': False,
+            'error': 'Could not add item to cart. The Add to Cart button was not found or could not be clicked.',
+            'restaurant': selected_restaurant['name'],
+            'item': selected_item['name'][:50],
+            'price': selected_item.get('price', ''),
+            'recommended_dish': recommended_dish if surprise_me else None,
+            'page_state': state.get('pageText', '')[:300]
+        }
+
+    # Clean the item name for display
+    display_name = selected_item['name']
+    for prefix in ['#1 most likedPlus small', '#2 most likedPlus small', '#3 most likedPlus small',
+                   '#1 most liked', '#2 most liked', '#3 most liked', 'Plus small']:
+        display_name = display_name.replace(prefix, '')
+    display_name = display_name.strip()
+
+    # Step 13: Automatically proceed to checkout with quantity 1
+    log("Proceeding to checkout...")
+    time.sleep(1)
+
+    # Click View Cart / Go to Checkout button
+    checkout_click = cdp_execute_script(ws_url, '''
+    (function() {
+        var buttons = document.querySelectorAll('button, a');
+        var targets = ['view cart', 'go to checkout', 'checkout', 'view order'];
+
+        for (var i = 0; i < buttons.length; i++) {
+            var btn = buttons[i];
+            var text = (btn.textContent || '').toLowerCase();
+
+            if (btn.disabled) continue;
+
+            for (var j = 0; j < targets.length; j++) {
+                if (text.includes(targets[j])) {
+                    btn.scrollIntoView({behavior: 'instant', block: 'center'});
+                    btn.click();
+                    return {clicked: true, text: btn.textContent.trim()};
+                }
+            }
+        }
+
+        // Also try cart icon
+        var cartIcon = document.querySelector('[data-testid*="cart"], [aria-label*="cart"]');
+        if (cartIcon) {
+            cartIcon.click();
+            return {clicked: true, method: 'cart-icon'};
+        }
+
+        return {clicked: false};
+    })();
+    ''')
+    log(f"Checkout click: {checkout_click}")
+    time.sleep(3)
+
+    # Click "Go to Checkout" if we're in cart view
+    go_checkout = cdp_execute_script(ws_url, '''
+    (function() {
+        var buttons = document.querySelectorAll('button, a');
+        for (var i = 0; i < buttons.length; i++) {
+            var text = (buttons[i].textContent || '').toLowerCase();
+            if (text.includes('go to checkout') || text.includes('proceed to checkout')) {
+                buttons[i].click();
+                return {clicked: true, text: buttons[i].textContent.trim()};
+            }
+        }
+        return {clicked: false};
+    })();
+    ''')
+    log(f"Go to checkout: {go_checkout}")
+    time.sleep(3)
+
+    # Check for interrupt before popup handling
+    if check_interrupt():
+        return {'success': False, 'error': 'Operation cancelled by user', 'interrupted': True}
+
+    # Handle any popups/modals that appear (upsell, promo, etc.) - click the bottom button in the modal
+    for popup_attempt in range(3):
+        if check_interrupt():
+            return {'success': False, 'error': 'Operation cancelled by user', 'interrupted': True}
+        dismiss_popup = cdp_execute_script(ws_url, '''
+        (function() {
+            // First check if we're already on the final checkout page (no popup needed)
+            var pageText = document.body.innerText.toLowerCase();
+            if (pageText.includes('place order') && !document.querySelector('[role="dialog"]')) {
+                return {dismissed: false, reason: 'already on checkout', onCheckout: true};
+            }
+
+            // Look for modal/dialog overlay - try multiple selectors
+            var modal = document.querySelector('[role="dialog"]');
+            if (!modal) modal = document.querySelector('[data-testid*="modal"]');
+            if (!modal) modal = document.querySelector('[aria-modal="true"]');
+            if (!modal) modal = document.querySelector('[class*="modal"]');
+            if (!modal) modal = document.querySelector('[class*="Modal"]');
+            if (!modal) modal = document.querySelector('[class*="overlay"]');
+            if (!modal) modal = document.querySelector('[class*="Overlay"]');
+
+            // Try finding by z-index (popups usually have high z-index)
+            if (!modal) {
+                var allDivs = document.querySelectorAll('div');
+                for (var d = 0; d < allDivs.length; d++) {
+                    var div = allDivs[d];
+                    var style = window.getComputedStyle(div);
+                    var zIndex = parseInt(style.zIndex) || 0;
+                    var position = style.position;
+
+                    // High z-index, fixed/absolute position, covering screen
+                    if (zIndex > 100 && (position === 'fixed' || position === 'absolute')) {
+                        var rect = div.getBoundingClientRect();
+                        if (rect.width > 300 && rect.height > 200) {
+                            modal = div;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (!modal) return {dismissed: false, reason: 'no modal found'};
+
+            // Find all buttons - search INSIDE the modal first, then globally if needed
+            var buttons = modal.querySelectorAll('button');
+
+            // Find the bottom-most visible button (horizontal bar at bottom of popup)
+            var bottomBtn = null;
+            var maxY = -1;
+
+            for (var i = 0; i < buttons.length; i++) {
+                var btn = buttons[i];
+
+                // Skip disabled
+                if (btn.disabled) continue;
+
+                // Skip navigation/accessibility links
+                var text = (btn.textContent || '').toLowerCase().trim();
+                if (text === 'skip to content' || text === 'back' || text === 'close') continue;
+
+                var rect = btn.getBoundingClientRect();
+
+                // Must be visible (has size and on screen)
+                if (rect.width < 80 || rect.height < 30) continue;
+                if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+
+                // Track the bottom-most button
+                if (rect.bottom > maxY) {
+                    maxY = rect.bottom;
+                    bottomBtn = btn;
+                }
+            }
+
+            if (bottomBtn) {
+                bottomBtn.scrollIntoView({behavior: 'instant', block: 'center'});
+                bottomBtn.click();
+                return {
+                    dismissed: true,
+                    text: bottomBtn.textContent.trim().substring(0, 50),
+                    method: 'bottom-button',
+                    y: maxY
+                };
+            }
+
+            // Try finding buttons with common dismiss text anywhere on page
+            var dismissTexts = ['next', 'skip', 'continue', 'no thanks', 'not now', 'done', 'got it'];
+            var allButtons = document.querySelectorAll('button');
+            for (var j = 0; j < allButtons.length; j++) {
+                var b = allButtons[j];
+                var bText = (b.textContent || '').toLowerCase().trim();
+                for (var k = 0; k < dismissTexts.length; k++) {
+                    if (bText === dismissTexts[k] || bText.startsWith(dismissTexts[k] + ' ')) {
+                        var bRect = b.getBoundingClientRect();
+                        if (bRect.width > 50 && bRect.height > 20 && !b.disabled) {
+                            b.click();
+                            return {dismissed: true, text: b.textContent.trim(), method: 'text-match'};
+                        }
+                    }
+                }
+            }
+
+            // Fallback: try clicking X/close buttons
+            var closeBtn = modal.querySelector('[aria-label="Close"], [aria-label="close"], button[class*="close"]');
+            if (closeBtn) {
+                closeBtn.click();
+                return {dismissed: true, method: 'close-btn'};
+            }
+
+            return {dismissed: false, hasModal: true, buttonCount: buttons.length};
+        })();
+        ''')
+        log(f"Popup dismiss attempt {popup_attempt+1}: {dismiss_popup}")
+
+        try:
+            popup_data = dismiss_popup.get('result', {}).get('result', {}).get('value', {})
+        except:
+            popup_data = {}
+
+        if popup_data.get('dismissed'):
+            time.sleep(1.5)
+            # Keep trying in case there are multiple popups
+        else:
+            # No more popups to dismiss
+            break
+
+    time.sleep(1)
+
+    # Check final state
+    final_check = cdp_execute_script(ws_url, '''
+    (function() {
+        var url = window.location.href;
+        var bodyText = document.body.innerText;
+        var isCheckout = url.includes('checkout') || bodyText.toLowerCase().includes('place order');
+
+        return {
+            url: url,
+            isCheckout: isCheckout,
+            pagePreview: bodyText.substring(0, 600)
+        };
+    })();
+    ''')
+    log(f"Final check: {final_check}")
+
+    try:
+        final_data = final_check.get('result', {}).get('result', {}).get('value', {})
+    except:
+        final_data = {}
+
+    on_checkout = final_data.get('isCheckout', False)
+
     return {
         'success': True,
-        'message': 'Item added to cart! Please review and complete checkout in Chrome.',
+        'message': f"Added {display_name} ({selected_item.get('price', '')}) to cart!",
         'restaurant': selected_restaurant['name'],
-        'item': selected_item['text'][:50],
+        'item': display_name,
+        'item_full': selected_item['name'][:50],
+        'price': selected_item.get('price', ''),
         'recommended_dish': recommended_dish if surprise_me else None,
-        'status': 'Ready for checkout - please review order in Chrome',
-        'in_cart': state.get('inCart', False)
+        'status': 'On checkout page - please review and place order in Chrome!' if on_checkout else 'Item in cart - open Chrome to complete checkout',
+        'on_checkout': on_checkout,
+        'in_cart': True,
+        'cart_button': state.get('viewCartBtn', None)
+    }
+
+
+def set_quantity_and_checkout(quantity=1):
+    """
+    Set the quantity for the item in cart and proceed to checkout.
+    """
+    import time
+
+    log(f"Setting quantity to {quantity} and going to checkout...")
+
+    # Get CDP connection
+    targets = cdp_get_targets()
+    if targets is None:
+        return {'success': False, 'error': 'Chrome not connected'}
+
+    ws_url = None
+    for target in targets:
+        if target.get('type') == 'page':
+            ws_url = target.get('webSocketDebuggerUrl')
+            break
+
+    if not ws_url:
+        return {'success': False, 'error': 'No Chrome tab available'}
+
+    # First, find and click the cart icon to open cart
+    open_cart = cdp_execute_script(ws_url, '''
+    (function() {
+        // Look for cart button/icon
+        var cartBtn = document.querySelector('[data-testid*="cart"], [aria-label*="cart"], [href*="cart"]');
+        if (!cartBtn) {
+            // Try finding by text
+            var buttons = document.querySelectorAll('button, a');
+            for (var i = 0; i < buttons.length; i++) {
+                var text = (buttons[i].textContent || '').toLowerCase();
+                if (text.includes('cart') || text.includes('view order')) {
+                    cartBtn = buttons[i];
+                    break;
+                }
+            }
+        }
+
+        if (cartBtn) {
+            cartBtn.click();
+            return {clicked: true};
+        }
+        return {clicked: false};
+    })();
+    ''')
+    log(f"Open cart: {open_cart}")
+    time.sleep(2)
+
+    # If quantity > 1, we need to increase it
+    if quantity > 1:
+        for q in range(quantity - 1):
+            increase_qty = cdp_execute_script(ws_url, '''
+            (function() {
+                // Look for + button or increase quantity button
+                var buttons = document.querySelectorAll('button, [role="button"]');
+                for (var i = 0; i < buttons.length; i++) {
+                    var btn = buttons[i];
+                    var text = btn.textContent || '';
+                    var label = btn.getAttribute('aria-label') || '';
+
+                    // Look for + or "increase" or "add"
+                    if (text === '+' || text === 'Add' || label.includes('increase') || label.includes('Increase') || label.includes('add 1')) {
+                        btn.click();
+                        return {clicked: true, btn: text || label};
+                    }
+                }
+
+                // Also try finding by Plus icon
+                var plusBtns = document.querySelectorAll('[data-testid*="increase"], [data-testid*="plus"], [aria-label*="Add"]');
+                if (plusBtns.length > 0) {
+                    plusBtns[0].click();
+                    return {clicked: true, method: 'plus-btn'};
+                }
+
+                return {clicked: false};
+            })();
+            ''')
+            log(f"Increase quantity: {increase_qty}")
+            time.sleep(0.5)
+
+    time.sleep(1)
+
+    # Now click "Go to Checkout" button
+    checkout_result = cdp_execute_script(ws_url, '''
+    (function() {
+        var buttons = document.querySelectorAll('button, a');
+        var targets = ['go to checkout', 'checkout', 'proceed to checkout', 'place order'];
+
+        for (var i = 0; i < buttons.length; i++) {
+            var btn = buttons[i];
+            var text = (btn.textContent || '').toLowerCase();
+
+            if (btn.disabled) continue;
+
+            for (var j = 0; j < targets.length; j++) {
+                if (text.includes(targets[j])) {
+                    btn.scrollIntoView({behavior: 'instant', block: 'center'});
+                    btn.click();
+                    return {
+                        clicked: true,
+                        text: btn.textContent.trim()
+                    };
+                }
+            }
+        }
+        return {clicked: false, availableButtons: Array.from(buttons).slice(0,15).map(b => b.textContent.trim().substring(0,30))};
+    })();
+    ''')
+    log(f"Checkout click: {checkout_result}")
+
+    try:
+        checkout_data = checkout_result.get('result', {}).get('result', {}).get('value', {})
+    except:
+        checkout_data = {}
+
+    time.sleep(3)
+
+    # Verify we're on checkout page
+    verify_checkout = cdp_execute_script(ws_url, '''
+    (function() {
+        var bodyText = document.body.innerText;
+        var url = window.location.href;
+
+        return {
+            onCheckout: url.includes('checkout') || bodyText.toLowerCase().includes('place order') || bodyText.toLowerCase().includes('payment'),
+            url: url,
+            pagePreview: bodyText.substring(0, 500)
+        };
+    })();
+    ''')
+    log(f"Checkout verify: {verify_checkout}")
+
+    try:
+        verify_data = verify_checkout.get('result', {}).get('result', {}).get('value', {})
+    except:
+        verify_data = {}
+
+    return {
+        'success': checkout_data.get('clicked', False),
+        'quantity': quantity,
+        'on_checkout': verify_data.get('onCheckout', False),
+        'message': f'Quantity set to {quantity}. {"On checkout page - please review and place order!" if verify_data.get("onCheckout") else "Please complete checkout in Chrome."}',
+        'url': verify_data.get('url', '')
     }
 
 
@@ -2366,8 +3848,30 @@ def handle_request(data):
             pickup_lon=data.get('pickup_lon'),
             pickup_address=data.get('pickup_address', ''),
             cuisine_type=data.get('cuisine_type', ''),
-            surprise_me=data.get('surprise_me', False)
+            surprise_me=data.get('surprise_me', False),
+            customization_answers=data.get('customization_answers', None)
         )
+    elif action == 'uber_eats_checkout':
+        return set_quantity_and_checkout(
+            quantity=data.get('quantity', 1)
+        )
+    elif action == 'interrupt':
+        # Set interrupt flag to stop current operation
+        INTERRUPT_FLAG.set()
+        log("🛑 INTERRUPT flag set - current operation will stop")
+        return {'success': True, 'message': 'Interrupt signal received'}
+    elif action == 'create_note':
+        # Create an Apple Note using AppleScript
+        title = data.get('title', 'Untitled')
+        body = data.get('body', '')
+        return create_apple_note(title, body)
+    elif action == 'get_spotify_track':
+        # Get currently playing track from Spotify web player
+        return get_spotify_current_track()
+    elif action == 'clear_interrupt':
+        # Clear interrupt flag
+        INTERRUPT_FLAG.clear()
+        return {'success': True, 'message': 'Interrupt flag cleared'}
     return {'success': False, 'error': 'Unknown action'}
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
