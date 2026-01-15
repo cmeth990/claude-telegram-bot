@@ -245,6 +245,71 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=ReplyKeyboardRemove()
     )
 
+
+async def handle_schedule_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Handle the interactive schedule creation flow.
+    Returns True if the message was handled as part of scheduling, False otherwise.
+    """
+    user_id = update.effective_user.id
+
+    if user_id not in pending_schedule_prompts:
+        return False
+
+    state = pending_schedule_prompts[user_id]
+    text = update.message.text
+
+    if state["step"] == "prompt":
+        # User entered their prompt, now ask for schedule
+        state["prompt"] = text
+        state["step"] = "schedule"
+
+        await update.message.reply_text(
+            f"✅ Got it! Your prompt:\n\"{text[:100]}{'...' if len(text) > 100 else ''}\"\n\n"
+            "**Step 2:** When should this run?\n\n"
+            "Examples:\n"
+            "• daily at 9am\n"
+            "• every monday at 10:30am\n"
+            "• hourly at :30\n"
+            "• every 2 hours\n"
+            "• in 1 hour (one-time)\n"
+            "• tomorrow at 8am (one-time)",
+            parse_mode="Markdown"
+        )
+        return True
+
+    elif state["step"] == "schedule":
+        # User entered schedule, create the task
+        prompt = state["prompt"]
+        chat_id = state["chat_id"]
+        frequency, time_spec = parse_schedule_input(text)
+
+        task = task_scheduler.add_task(
+            user_id=user_id,
+            chat_id=chat_id,
+            prompt=prompt,
+            frequency=frequency,
+            time_spec=time_spec,
+            use_tools=True,
+            description=prompt[:50]
+        )
+
+        del pending_schedule_prompts[user_id]
+
+        await update.message.reply_text(
+            f"✅ Scheduled task created!\n\n"
+            f"🆔 ID: `{task.task_id}`\n"
+            f"📝 Prompt: {prompt[:100]}\n"
+            f"🕐 Schedule: {frequency} at {time_spec}\n"
+            f"⏭️ Next run: {task.next_run}\n\n"
+            f"Use /tasks to see all scheduled tasks.",
+            parse_mode="Markdown"
+        )
+        return True
+
+    return False
+
+
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -798,69 +863,6 @@ async def run_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🚀 Running task: {task.description}...")
     await task_scheduler.execute_task(task)
 
-
-async def handle_schedule_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """
-    Handle the interactive schedule creation flow.
-    Returns True if the message was handled as part of scheduling, False otherwise.
-    """
-    user_id = update.effective_user.id
-
-    if user_id not in pending_schedule_prompts:
-        return False
-
-    state = pending_schedule_prompts[user_id]
-    text = update.message.text
-
-    if state["step"] == "prompt":
-        # User entered their prompt, now ask for schedule
-        state["prompt"] = text
-        state["step"] = "schedule"
-
-        await update.message.reply_text(
-            f"✅ Got it! Your prompt:\n\"{text[:100]}{'...' if len(text) > 100 else ''}\"\n\n"
-            "**Step 2:** When should this run?\n\n"
-            "Examples:\n"
-            "• daily at 9am\n"
-            "• every monday at 10:30am\n"
-            "• hourly at :30\n"
-            "• every 2 hours\n"
-            "• in 1 hour (one-time)\n"
-            "• tomorrow at 8am (one-time)",
-            parse_mode="Markdown"
-        )
-        return True
-
-    elif state["step"] == "schedule":
-        # User entered schedule, create the task
-        prompt = state["prompt"]
-        chat_id = state["chat_id"]
-        frequency, time_spec = parse_schedule_input(text)
-
-        task = task_scheduler.add_task(
-            user_id=user_id,
-            chat_id=chat_id,
-            prompt=prompt,
-            frequency=frequency,
-            time_spec=time_spec,
-            use_tools=True,
-            description=prompt[:50]
-        )
-
-        del pending_schedule_prompts[user_id]
-
-        await update.message.reply_text(
-            f"✅ Scheduled task created!\n\n"
-            f"🆔 ID: `{task.task_id}`\n"
-            f"📝 Prompt: {prompt[:100]}\n"
-            f"🕐 Schedule: {frequency} at {time_spec}\n"
-            f"⏭️ Next run: {task.next_run}\n\n"
-            f"Use /tasks to see all scheduled tasks.",
-            parse_mode="Markdown"
-        )
-        return True
-
-    return False
 
 # ============= END SCHEDULED TASKS COMMANDS =============
 
