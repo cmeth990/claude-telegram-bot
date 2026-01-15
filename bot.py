@@ -731,10 +731,11 @@ async def delete_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = update.effective_user.id
 
     if not context.args:
-        await update.message.reply_text("Usage: /deletetask <task_id>\n\nUse /tasks to see your task IDs.")
+        await update.message.reply_text("Usage: /deletetask task_id\n\nUse /tasks to see your task IDs.")
         return
 
-    task_id = context.args[0]
+    # Strip any angle brackets that user might have copied
+    task_id = context.args[0].strip('<>').strip()
     task = task_scheduler.get_task(task_id)
 
     if not task:
