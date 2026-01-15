@@ -78,7 +78,25 @@ MAC_TOOLS = [
          "cuisine_type": {"type": "string", "description": "Type of cuisine to search for (pizza, sushi, mexican, etc.)"},
          "surprise_me": {"type": "boolean", "description": "If true, auto-select best restaurant and top-rated dish", "default": False},
          "customization_answers": {"type": "array", "items": {"type": "object", "properties": {"question": {"type": "string"}, "answer": {"type": "string"}}}, "description": "User's answers to customization questions from step 1"}
-     }, "required": []}}
+     }, "required": []}},
+    {"name": "order_amazon", "description": """Order items from Amazon using browser automation.
+
+    SMART ORDERING FLOW:
+    1. First checks your Amazon order history for the item
+    2. If you've ordered it before, goes directly to that product (reorder)
+    3. If not found, searches Amazon and selects the best option (Amazon's Choice, Best Seller, Prime items prioritized)
+    4. Adds to cart and proceeds to checkout
+    5. STOPS before placing order - user must confirm in Chrome
+
+    Use this for household items, repeat purchases, or any Amazon order.
+    Examples: "paper towels", "AA batteries", "dish soap", "cat food"
+
+    The automation will NOT place the order - it stops at checkout for user confirmation.""",
+     "input_schema": {"type": "object", "properties": {
+         "item_description": {"type": "string", "description": "What to order (e.g., 'paper towels', 'AA batteries', 'dish soap')"},
+         "check_previous_orders": {"type": "boolean", "description": "If true (default), checks order history first to reorder the same item", "default": True},
+         "quantity": {"type": "integer", "description": "Number of items to order (default: 1)", "default": 1}
+     }, "required": ["item_description"]}}
 ]
 
 def call_mac_sync(action, timeout=30.0, **kwargs):
@@ -169,15 +187,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mac_features = (
             "**Mac Features (Available):**\n"
             "/notes <text> - Create Apple Note\n"
+            "/order <item> - Amazon quick order\n"
             "/song - Analyze Spotify track\n"
             "🚗 Uber ordering\n"
+            "🛒 Amazon ordering\n"
             "🖼️ Browser & screenshots\n"
         )
     else:
         mode = "☁️ **CLOUD MODE** - Chat & scheduled tasks"
         mac_features = (
             "**Mac Features (Offline):**\n"
-            "❌ Notes, Spotify, Uber, Browser\n"
+            "❌ Notes, Spotify, Uber, Amazon, Browser\n"
             "_Start Mac agent for full access_\n"
         )
 
@@ -372,6 +392,13 @@ UBER RIDES (when Mac available):
 UBER EATS (when Mac available):
 - Ask what type of food they want
 - Handle the two-step customization flow
+
+AMAZON ORDERING (when Mac available):
+- Use order_amazon tool OR user can use /order command directly
+- Checks order history first to reorder same items
+- If not found in history, searches and selects best option (Amazon's Choice, Prime preferred)
+- Stops at checkout for user to confirm - does NOT place order automatically
+- User can say "order paper towels" or "I need batteries" and you should use order_amazon
 
 IMAGE CAPTURE (when Mac available):
 USE capture_images - it downloads actual image files with their source links.
@@ -660,6 +687,38 @@ Be helpful, conversational, and proactive. If you can help with something even w
                             # Clear active operation
                             active_operations.pop(user_id, None)
                         tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
+                    elif tool_name == "order_amazon":
+                        item_description = tool_input.get("item_description", "")
+                        check_previous = tool_input.get("check_previous_orders", True)
+                        quantity = tool_input.get("quantity", 1)
+
+                        # Track operation and clear interrupt flag
+                        user_interrupt_flag[user_id] = False
+                        op_desc = f"Amazon: {item_description}"
+                        active_operations[user_id] = op_desc
+
+                        await update.message.reply_text(f"🛒 Searching Amazon for: {item_description}\n(Use /stop to cancel)")
+
+                        # Check for interrupt before starting
+                        if user_interrupt_flag.get(user_id):
+                            result = {"success": False, "error": "Operation cancelled by user"}
+                        else:
+                            # Call Amazon ordering automation
+                            result = await call_mac_async(
+                                "order_amazon",
+                                timeout=180.0,
+                                item_description=item_description,
+                                check_previous_orders=check_previous,
+                                quantity=quantity
+                            )
+
+                        # Check if interrupted during execution
+                        if user_interrupt_flag.get(user_id):
+                            result = {"success": False, "error": "Operation cancelled by user", "interrupted": True}
+
+                        # Clear active operation
+                        active_operations.pop(user_id, None)
+                        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(result)})
             for screenshot in screenshots_to_send:
                 try:
                     screenshot_bytes = base64.b64decode(screenshot["data"])
@@ -781,6 +840,91 @@ async def notes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Note created!\n\n📌 Title: {title}")
     else:
         await update.message.reply_text(f"❌ Failed to create note: {result.get('error', 'Unknown error')}")
+
+
+async def order_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /order command - order items from Amazon"""
+    user_id = update.effective_user.id
+
+    # Check if Mac agent is online
+    if not is_mac_online():
+        await update.message.reply_text(
+            "❌ Mac agent is offline.\n\n"
+            "Amazon ordering requires the Mac to be online with Chrome running.\n"
+            "Please start the Mac agent and try again."
+        )
+        return
+
+    # Get the item description
+    if not context.args:
+        await update.message.reply_text(
+            "🛒 **Amazon Quick Order**\n\n"
+            "Usage: `/order <item description>`\n\n"
+            "Examples:\n"
+            "• `/order paper towels`\n"
+            "• `/order AA batteries`\n"
+            "• `/order dish soap`\n"
+            "• `/order cat food`\n\n"
+            "I'll check if you've ordered it before and reorder, "
+            "or find the best option on Amazon.\n\n"
+            "_Note: Order will stop at checkout for your confirmation._",
+            parse_mode="Markdown"
+        )
+        return
+
+    item_description = ' '.join(context.args)
+
+    # Track operation
+    user_interrupt_flag[user_id] = False
+    active_operations[user_id] = f"Amazon: {item_description}"
+
+    await update.message.reply_text(
+        f"🛒 Ordering: **{item_description}**\n\n"
+        "1️⃣ Checking your order history...\n"
+        "2️⃣ Will find best option if not ordered before\n"
+        "3️⃣ Adding to cart & checkout\n\n"
+        "_Use /stop to cancel_",
+        parse_mode="Markdown"
+    )
+
+    try:
+        # Call the Amazon ordering automation
+        result = await call_mac_async(
+            "order_amazon",
+            timeout=180.0,
+            item_description=item_description,
+            check_previous_orders=True,
+            quantity=1
+        )
+
+        # Clear active operation
+        active_operations.pop(user_id, None)
+
+        if result.get('success'):
+            product = result.get('product', {})
+            cart = result.get('cart', {})
+            from_history = "✅ Reordering from history!" if result.get('from_order_history') else "🆕 New item found"
+
+            message = (
+                f"🛒 **Added to Cart!**\n\n"
+                f"📦 {product.get('title', item_description)[:80]}\n"
+                f"💰 {product.get('price', 'See Chrome')}\n"
+                f"📊 Qty: {product.get('quantity', 1)}\n\n"
+                f"{from_history}\n\n"
+                f"🛍️ Cart: {cart.get('item_count', 1)} item(s) - {cart.get('subtotal', '')}\n\n"
+                f"**{result.get('status', 'Check Chrome to complete order')}**"
+            )
+            await update.message.reply_text(message, parse_mode="Markdown")
+        else:
+            error = result.get('error', 'Unknown error')
+            await update.message.reply_text(
+                f"❌ Could not complete order:\n\n{error}\n\n"
+                "Try opening Chrome and ordering manually at amazon.com"
+            )
+    except Exception as e:
+        active_operations.pop(user_id, None)
+        logger.error(f"Amazon order error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
 
 
 # ============= SCHEDULED TASKS COMMANDS =============
@@ -1065,6 +1209,7 @@ def main():
     application.add_handler(CommandHandler("cancel", stop_command))  # Alias for /stop
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("notes", notes_command))
+    application.add_handler(CommandHandler("order", order_command))
     application.add_handler(CommandHandler("song", song_command))
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))

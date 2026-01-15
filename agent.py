@@ -3717,6 +3717,579 @@ def set_quantity_and_checkout(quantity=1):
     }
 
 
+def order_amazon(item_description, check_previous_orders=True, quantity=1):
+    """
+    Automated Amazon ordering using Chrome DevTools Protocol (CDP).
+
+    Flow:
+    1. First checks order history for the item (if check_previous_orders=True)
+    2. If found in history, offers to reorder
+    3. If not found, searches Amazon and selects best option
+    4. Adds to cart and proceeds to checkout (stops before placing order)
+
+    Returns status and requires user confirmation before final purchase.
+    """
+    import time
+    import urllib.parse
+
+    log(f"Starting Amazon order: '{item_description}', check_previous={check_previous_orders}, qty={quantity}")
+
+    # Clear any previous interrupt flag
+    clear_interrupt()
+
+    # Step 1: Check CDP connection
+    targets = cdp_get_targets()
+    if targets is None:
+        return {'success': False, 'error': 'Chrome debug mode not running. Start agent.py to auto-launch Chrome.'}
+
+    ws_url = None
+    for target in targets:
+        if target.get('type') == 'page':
+            ws_url = target.get('webSocketDebuggerUrl')
+            break
+
+    if not ws_url:
+        return {'success': False, 'error': 'No Chrome tab available'}
+
+    log(f"Connected to Chrome tab: {ws_url}")
+
+    # Check for interrupt
+    if check_interrupt():
+        return {'success': False, 'error': 'Operation cancelled by user', 'interrupted': True}
+
+    # Step 2: Navigate to Amazon
+    log("Navigating to Amazon...")
+    cdp_navigate(ws_url, "https://www.amazon.com")
+    time.sleep(3)
+
+    # Step 3: Check if logged in
+    login_check = cdp_execute_script(ws_url, '''
+    (function() {
+        var bodyText = document.body.innerText.toLowerCase();
+        var hasSignIn = bodyText.includes('sign in') && !bodyText.includes('sign out');
+        var hasAccount = document.querySelector('#nav-link-accountList, #nav-link-yourAccount, [data-nav-role="signin"]');
+        var accountText = hasAccount ? hasAccount.innerText.toLowerCase() : '';
+        var isLoggedIn = accountText.includes('hello,') || accountText.includes('account');
+
+        return {
+            needsLogin: !isLoggedIn && hasSignIn,
+            accountText: accountText.substring(0, 100),
+            pageTitle: document.title
+        };
+    })();
+    ''')
+    log(f"Login check: {login_check}")
+
+    try:
+        login_state = login_check.get('result', {}).get('result', {}).get('value', {})
+    except:
+        login_state = {}
+
+    if login_state.get('needsLogin'):
+        return {
+            'success': False,
+            'error': 'You need to log into Amazon first. Open Chrome and sign in at amazon.com'
+        }
+
+    # Step 4: Check previous orders if requested
+    found_in_history = None
+    if check_previous_orders:
+        log("Checking order history...")
+        if check_interrupt():
+            return {'success': False, 'error': 'Operation cancelled by user', 'interrupted': True}
+
+        # Navigate to order history
+        cdp_navigate(ws_url, "https://www.amazon.com/gp/your-account/order-history")
+        time.sleep(3)
+
+        # Search within orders
+        search_orders_script = '''
+        (function() {
+            // Look for search box in orders page
+            var searchBox = document.querySelector('input[name="search"], input[id*="search"], input[placeholder*="Search"]');
+            if (searchBox) {
+                searchBox.focus();
+                return {found: true, hasSearchBox: true};
+            }
+            return {found: false, hasSearchBox: false, pageText: document.body.innerText.substring(0, 500)};
+        })();
+        '''
+        search_box_result = cdp_execute_script(ws_url, search_orders_script)
+        log(f"Order search box: {search_box_result}")
+
+        try:
+            search_data = search_box_result.get('result', {}).get('result', {}).get('value', {})
+        except:
+            search_data = {}
+
+        if search_data.get('hasSearchBox'):
+            # Type the search query
+            time.sleep(0.5)
+            cdp_type_text(ws_url, item_description)
+            time.sleep(0.3)
+            cdp_press_key(ws_url, 'Enter')
+            time.sleep(3)
+
+            # Check if we found matching orders
+            check_orders = cdp_execute_script(ws_url, '''
+            (function() {
+                var orders = [];
+                var orderCards = document.querySelectorAll('.order-card, [class*="order-info"], .a-box-group');
+
+                for (var i = 0; i < Math.min(orderCards.length, 5); i++) {
+                    var card = orderCards[i];
+                    var text = card.innerText || '';
+
+                    // Look for "Buy it again" or product links
+                    var buyAgainBtn = card.querySelector('a[href*="buy-again"], input[value*="Buy it again"], a[href*="reorder"]');
+                    var productLink = card.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]');
+
+                    if (text.length > 20) {
+                        orders.push({
+                            text: text.substring(0, 200),
+                            hasBuyAgain: buyAgainBtn !== null,
+                            hasProductLink: productLink !== null,
+                            productUrl: productLink ? productLink.href : null
+                        });
+                    }
+                }
+
+                // Also look for "Buy it again" buttons anywhere
+                var buyAgainButtons = document.querySelectorAll('a[href*="buy-again"], span:contains("Buy it again")');
+
+                return {
+                    orderCount: orders.length,
+                    orders: orders,
+                    pageHasBuyAgain: document.body.innerText.includes('Buy it again'),
+                    pageText: document.body.innerText.substring(0, 800)
+                };
+            })();
+            ''')
+            log(f"Order history search: {check_orders}")
+
+            try:
+                orders_data = check_orders.get('result', {}).get('result', {}).get('value', {})
+            except:
+                orders_data = {}
+
+            # If found matching orders, try to get "Buy it again" option
+            if orders_data.get('orderCount', 0) > 0 or orders_data.get('pageHasBuyAgain'):
+                # Look for the first product with Buy it again
+                for order in orders_data.get('orders', []):
+                    if order.get('hasBuyAgain') or order.get('hasProductLink'):
+                        found_in_history = {
+                            'found': True,
+                            'description': order.get('text', '')[:100],
+                            'product_url': order.get('productUrl')
+                        }
+                        break
+
+    # Step 5: If found in history, go to that product
+    if found_in_history and found_in_history.get('product_url'):
+        log(f"Found in order history! Navigating to previous product...")
+        cdp_navigate(ws_url, found_in_history['product_url'])
+        time.sleep(3)
+    else:
+        # Step 6: Search for item on Amazon
+        log(f"Searching Amazon for: {item_description}")
+        if check_interrupt():
+            return {'success': False, 'error': 'Operation cancelled by user', 'interrupted': True}
+
+        # Navigate to Amazon search
+        search_url = f"https://www.amazon.com/s?k={urllib.parse.quote(item_description)}"
+        cdp_navigate(ws_url, search_url)
+        time.sleep(3)
+
+    # Step 7: Get search results and find best option
+    log("Analyzing search results...")
+    time.sleep(1)
+
+    results_script = '''
+    (function() {
+        var products = [];
+
+        // Find product cards in search results
+        var productCards = document.querySelectorAll('[data-component-type="s-search-result"], .s-result-item[data-asin]');
+
+        for (var i = 0; i < Math.min(productCards.length, 10); i++) {
+            var card = productCards[i];
+            var asin = card.getAttribute('data-asin');
+            if (!asin) continue;
+
+            // Get title
+            var titleEl = card.querySelector('h2 a span, .a-text-normal');
+            var title = titleEl ? titleEl.innerText.trim() : '';
+
+            // Get price
+            var priceEl = card.querySelector('.a-price .a-offscreen, .a-price-whole');
+            var price = priceEl ? priceEl.innerText.trim() : '';
+
+            // Get rating
+            var ratingEl = card.querySelector('.a-icon-star-small, [class*="star"]');
+            var rating = ratingEl ? ratingEl.innerText.trim() : '';
+
+            // Get review count
+            var reviewEl = card.querySelector('[aria-label*="stars"] + span, .a-size-small .a-link-normal');
+            var reviews = reviewEl ? reviewEl.innerText.trim() : '';
+
+            // Check for Amazon's Choice or Best Seller badges
+            var hasBadge = card.querySelector('[class*="amazons-choice"], [class*="best-seller"]') !== null;
+            var isPrime = card.querySelector('[class*="prime"], [aria-label*="Prime"]') !== null;
+
+            // Get product link
+            var linkEl = card.querySelector('h2 a, a.a-link-normal[href*="/dp/"]');
+            var link = linkEl ? linkEl.href : '';
+
+            if (title && link) {
+                products.push({
+                    asin: asin,
+                    title: title.substring(0, 150),
+                    price: price,
+                    rating: rating,
+                    reviews: reviews,
+                    hasBadge: hasBadge,
+                    isPrime: isPrime,
+                    link: link,
+                    index: i
+                });
+            }
+        }
+
+        // Sort by: badges first, then Prime, then by position (Amazon's ranking)
+        products.sort(function(a, b) {
+            if (a.hasBadge !== b.hasBadge) return b.hasBadge - a.hasBadge;
+            if (a.isPrime !== b.isPrime) return b.isPrime - a.isPrime;
+            return a.index - b.index;
+        });
+
+        return {
+            count: products.length,
+            products: products,
+            pageTitle: document.title
+        };
+    })();
+    '''
+    results = cdp_execute_script(ws_url, results_script)
+    log(f"Search results: {results}")
+
+    try:
+        results_data = results.get('result', {}).get('result', {}).get('value', {})
+    except:
+        results_data = {}
+
+    products = results_data.get('products', [])
+
+    if not products:
+        return {
+            'success': False,
+            'error': f'No products found for "{item_description}". Try a different search term.',
+            'from_history': found_in_history is not None
+        }
+
+    # Select the best product (first after sorting)
+    selected = products[0]
+    log(f"Selected product: {selected['title'][:60]}... - {selected['price']}")
+
+    # Step 8: Navigate to product page
+    if check_interrupt():
+        return {'success': False, 'error': 'Operation cancelled by user', 'interrupted': True}
+
+    log(f"Navigating to product: {selected['link'][:80]}...")
+    cdp_navigate(ws_url, selected['link'])
+    time.sleep(3)
+
+    # Step 9: Get product details from the page
+    product_details = cdp_execute_script(ws_url, '''
+    (function() {
+        var title = document.querySelector('#productTitle, #title');
+        var price = document.querySelector('.a-price .a-offscreen, #priceblock_ourprice, #priceblock_dealprice, .a-price-whole');
+        var availability = document.querySelector('#availability span, #outOfStock');
+        var addToCartBtn = document.querySelector('#add-to-cart-button, #addToCart');
+        var buyNowBtn = document.querySelector('#buy-now-button');
+
+        // Check for Subscribe & Save
+        var hasSubscribe = document.querySelector('#snsAccordionRowMiddle, [id*="subscribe"]') !== null;
+
+        // Get main image
+        var mainImage = document.querySelector('#landingImage, #imgBlkFront');
+        var imageUrl = mainImage ? mainImage.src : '';
+
+        return {
+            title: title ? title.innerText.trim().substring(0, 200) : '',
+            price: price ? price.innerText.trim() : '',
+            availability: availability ? availability.innerText.trim() : '',
+            hasAddToCart: addToCartBtn !== null,
+            hasBuyNow: buyNowBtn !== null,
+            hasSubscribe: hasSubscribe,
+            imageUrl: imageUrl,
+            url: window.location.href
+        };
+    })();
+    ''')
+    log(f"Product details: {product_details}")
+
+    try:
+        details = product_details.get('result', {}).get('result', {}).get('value', {})
+    except:
+        details = {}
+
+    if not details.get('hasAddToCart'):
+        return {
+            'success': False,
+            'error': 'Product page does not have an Add to Cart button. Item may be unavailable.',
+            'product': details.get('title', selected['title'])[:100],
+            'availability': details.get('availability', 'Unknown')
+        }
+
+    # Step 10: Set quantity if needed
+    if quantity > 1:
+        log(f"Setting quantity to {quantity}...")
+        set_qty_script = f'''
+        (function() {{
+            var qtySelect = document.querySelector('#quantity, select[name="quantity"]');
+            if (qtySelect) {{
+                qtySelect.value = '{quantity}';
+                qtySelect.dispatchEvent(new Event('change', {{bubbles: true}}));
+                return {{set: true, method: 'select'}};
+            }}
+
+            // Try input field
+            var qtyInput = document.querySelector('input[name="quantity"]');
+            if (qtyInput) {{
+                qtyInput.value = '{quantity}';
+                qtyInput.dispatchEvent(new Event('change', {{bubbles: true}}));
+                return {{set: true, method: 'input'}};
+            }}
+
+            return {{set: false}};
+        }})();
+        '''
+        cdp_execute_script(ws_url, set_qty_script)
+        time.sleep(0.5)
+
+    # Step 11: Click Add to Cart
+    log("Adding to cart...")
+    if check_interrupt():
+        return {'success': False, 'error': 'Operation cancelled by user', 'interrupted': True}
+
+    add_to_cart = cdp_execute_script(ws_url, '''
+    (function() {
+        // Make sure we're not subscribed (prefer one-time purchase)
+        var oneTimeRadio = document.querySelector('input[id*="oneTime"], input[value*="one-time"]');
+        if (oneTimeRadio && !oneTimeRadio.checked) {
+            oneTimeRadio.click();
+        }
+
+        var addBtn = document.querySelector('#add-to-cart-button, #addToCart, input[name="submit.add-to-cart"]');
+        if (addBtn) {
+            addBtn.scrollIntoView({behavior: 'instant', block: 'center'});
+            addBtn.click();
+            return {clicked: true, buttonText: addBtn.value || addBtn.innerText};
+        }
+        return {clicked: false};
+    })();
+    ''')
+    log(f"Add to cart result: {add_to_cart}")
+
+    try:
+        add_result = add_to_cart.get('result', {}).get('result', {}).get('value', {})
+    except:
+        add_result = {}
+
+    if not add_result.get('clicked'):
+        return {
+            'success': False,
+            'error': 'Could not click Add to Cart button.',
+            'product': details.get('title', '')[:100]
+        }
+
+    time.sleep(3)
+
+    # Step 12: Handle post-add-to-cart page (upsells, protection plans, etc.)
+    log("Handling post-cart page...")
+
+    # Dismiss any upsell modals and go to cart
+    for attempt in range(3):
+        if check_interrupt():
+            return {'success': False, 'error': 'Operation cancelled by user', 'interrupted': True}
+
+        handle_popup = cdp_execute_script(ws_url, '''
+        (function() {
+            // Check for "Added to Cart" confirmation
+            var addedConfirm = document.querySelector('#attachDisplayAddBase498498, #huc-v2-order-row-confirm-text, [class*="add-to-cart-confirmation"]');
+
+            // Look for "Go to Cart" or "Proceed to checkout" buttons
+            var cartBtn = document.querySelector('a[href*="/cart"], a[href*="cart"], input[value*="Cart"], #hlb-view-cart-announce, #sc-buy-box-ptc-button');
+            var checkoutBtn = document.querySelector('input[name*="checkout"], a[href*="checkout"], #hlb-ptc-btn-native');
+
+            // Skip upsells - look for "No thanks" or skip buttons
+            var skipBtn = document.querySelector('[id*="no-thanks"], [id*="skip"], a[href*="cart"]:not([href*="add"])');
+
+            if (skipBtn && skipBtn.innerText.toLowerCase().includes('no')) {
+                skipBtn.click();
+                return {action: 'skipped-upsell', text: skipBtn.innerText.substring(0, 50)};
+            }
+
+            if (cartBtn) {
+                cartBtn.click();
+                return {action: 'go-to-cart', found: true};
+            }
+
+            if (checkoutBtn) {
+                return {action: 'checkout-available', found: true};
+            }
+
+            return {action: 'none', addedConfirm: addedConfirm !== null, pageText: document.body.innerText.substring(0, 300)};
+        })();
+        ''')
+        log(f"Post-cart handling {attempt+1}: {handle_popup}")
+
+        try:
+            popup_result = handle_popup.get('result', {}).get('result', {}).get('value', {})
+        except:
+            popup_result = {}
+
+        if popup_result.get('action') == 'go-to-cart':
+            time.sleep(2)
+            break
+        elif popup_result.get('action') == 'skipped-upsell':
+            time.sleep(1)
+            continue
+        else:
+            time.sleep(1)
+
+    # Step 13: Navigate to cart to verify
+    log("Verifying cart...")
+    cdp_navigate(ws_url, "https://www.amazon.com/gp/cart/view.html")
+    time.sleep(3)
+
+    # Step 14: Verify item is in cart
+    cart_verify = cdp_execute_script(ws_url, '''
+    (function() {
+        var items = [];
+        var cartItems = document.querySelectorAll('.sc-list-item, [data-asin]');
+
+        for (var i = 0; i < cartItems.length; i++) {
+            var item = cartItems[i];
+            var titleEl = item.querySelector('.sc-product-title, .a-truncate-cut');
+            var priceEl = item.querySelector('.sc-product-price, .a-price .a-offscreen');
+            var qtyEl = item.querySelector('select[name*="quantity"], .a-dropdown-prompt');
+
+            if (titleEl) {
+                items.push({
+                    title: titleEl.innerText.trim().substring(0, 100),
+                    price: priceEl ? priceEl.innerText.trim() : '',
+                    quantity: qtyEl ? qtyEl.value || qtyEl.innerText.trim() : '1'
+                });
+            }
+        }
+
+        // Get subtotal
+        var subtotalEl = document.querySelector('#sc-subtotal-amount-activecart, .sc-subtotal');
+        var subtotal = subtotalEl ? subtotalEl.innerText.trim() : '';
+
+        // Check for checkout button
+        var checkoutBtn = document.querySelector('#sc-buy-box-ptc-button, input[name*="checkout"], a[href*="checkout"]');
+
+        return {
+            itemCount: items.length,
+            items: items,
+            subtotal: subtotal,
+            hasCheckout: checkoutBtn !== null,
+            url: window.location.href
+        };
+    })();
+    ''')
+    log(f"Cart verification: {cart_verify}")
+
+    try:
+        cart_data = cart_verify.get('result', {}).get('result', {}).get('value', {})
+    except:
+        cart_data = {}
+
+    if cart_data.get('itemCount', 0) == 0:
+        return {
+            'success': False,
+            'error': 'Item was not added to cart. Please try again.',
+            'product': details.get('title', selected['title'])[:100]
+        }
+
+    # Step 15: Proceed to checkout
+    log("Proceeding to checkout...")
+    if check_interrupt():
+        return {'success': False, 'error': 'Operation cancelled by user', 'interrupted': True}
+
+    checkout_click = cdp_execute_script(ws_url, '''
+    (function() {
+        var checkoutBtn = document.querySelector('#sc-buy-box-ptc-button, input[name*="proceedToRetailCheckout"], a[href*="checkout"]');
+        if (checkoutBtn) {
+            checkoutBtn.click();
+            return {clicked: true};
+        }
+        return {clicked: false};
+    })();
+    ''')
+    log(f"Checkout click: {checkout_click}")
+
+    time.sleep(4)
+
+    # Step 16: Verify we're on checkout page
+    final_check = cdp_execute_script(ws_url, '''
+    (function() {
+        var url = window.location.href;
+        var isCheckout = url.includes('checkout') || url.includes('buy');
+        var bodyText = document.body.innerText;
+
+        // Get shipping address if visible
+        var addressEl = document.querySelector('#shipping-address, .ship-to-this-address, [data-testid*="address"]');
+        var address = addressEl ? addressEl.innerText.substring(0, 100) : '';
+
+        // Get order total
+        var totalEl = document.querySelector('#subtotals-marketplace-table, .order-summary');
+        var total = totalEl ? totalEl.innerText.substring(0, 200) : '';
+
+        // Check for Place Order button
+        var placeOrderBtn = document.querySelector('#submitOrderButtonId, input[name*="placeYourOrder"], #turbo-checkout-pyo-button');
+
+        return {
+            isCheckout: isCheckout,
+            url: url,
+            hasPlaceOrder: placeOrderBtn !== null,
+            shippingAddress: address,
+            orderTotal: total,
+            pagePreview: bodyText.substring(0, 400)
+        };
+    })();
+    ''')
+    log(f"Final checkout state: {final_check}")
+
+    try:
+        final_data = final_check.get('result', {}).get('result', {}).get('value', {})
+    except:
+        final_data = {}
+
+    # Build response
+    return {
+        'success': True,
+        'message': f"Added to cart: {details.get('title', selected['title'])[:80]}",
+        'product': {
+            'title': details.get('title', selected['title'])[:150],
+            'price': details.get('price', selected['price']),
+            'quantity': quantity,
+            'image_url': details.get('imageUrl', '')
+        },
+        'cart': {
+            'item_count': cart_data.get('itemCount', 1),
+            'subtotal': cart_data.get('subtotal', details.get('price', ''))
+        },
+        'from_order_history': found_in_history is not None,
+        'on_checkout': final_data.get('isCheckout', False),
+        'has_place_order': final_data.get('hasPlaceOrder', False),
+        'shipping_address': final_data.get('shippingAddress', ''),
+        'status': 'Ready for checkout! Please review the order in Chrome and click "Place your order" when ready.' if final_data.get('hasPlaceOrder') else 'Item in cart. Please complete checkout in Chrome.'
+    }
+
+
 def download_selected_images(indices):
     global _cached_images
     import urllib.request
@@ -3853,6 +4426,12 @@ def handle_request(data):
         )
     elif action == 'uber_eats_checkout':
         return set_quantity_and_checkout(
+            quantity=data.get('quantity', 1)
+        )
+    elif action == 'order_amazon':
+        return order_amazon(
+            item_description=data.get('item_description', ''),
+            check_previous_orders=data.get('check_previous_orders', True),
             quantity=data.get('quantity', 1)
         )
     elif action == 'interrupt':
